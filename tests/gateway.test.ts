@@ -21,7 +21,7 @@ import {
   verifyPassword,
   type GatewayState,
 } from '../src/state.ts'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -140,11 +140,23 @@ describe('session cookies', () => {
     const sig = payload // wrong signature also fine — tamper must fail anyway
     expect(verifyCookie(secret, `${payload}.${sig}`, Date.now())).toBe(false)
   })
+
+  it('rejects a cookie signed under a different session epoch', () => {
+    const cookie = signCookie(secret, 9999999999999, 1)
+    expect(verifyCookie(secret, cookie, Date.now(), 0)).toBe(false)
+    expect(verifyCookie(secret, cookie, Date.now(), 1)).toBe(true)
+  })
+
+  it('treats an epoch-less (pre-0.5.0) cookie as epoch 0', () => {
+    const cookie = signCookie(secret, 9999999999999) // no epoch → 0
+    expect(verifyCookie(secret, cookie, Date.now(), 0)).toBe(true)
+    expect(verifyCookie(secret, cookie, Date.now(), 1)).toBe(false)
+  })
 })
 
 describe('password state', () => {
   it('round-trips set -> verify', () => {
-    let state: GatewayState = { cookieSecret: 'a'.repeat(32) }
+    let state: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
     expect(verifyPassword(state, 'hunter2')).toBe(false)
     state = setPassword(state, 'hunter2')
     expect(state.password).toBeDefined()
@@ -154,14 +166,14 @@ describe('password state', () => {
   })
 
   it('clears the password', () => {
-    let state: GatewayState = setPassword({ cookieSecret: 'a'.repeat(32) }, 'hunter2')
+    let state: GatewayState = setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
     state = setPassword(state, undefined)
     expect(state.password).toBeUndefined()
     expect(verifyPassword(state, 'hunter2')).toBe(false)
   })
 
   it('re-salts on every write (hashes differ)', () => {
-    const base: GatewayState = { cookieSecret: 'a'.repeat(32) }
+    const base: GatewayState = { cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }
     const a = setPassword(base, 'same-password')
     const b = setPassword(base, 'same-password')
     expect(a.password!.hash).not.toBe(b.password!.hash)
@@ -173,7 +185,7 @@ describe('password state', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-state-'))
     const home = join(dir, 'fake-home')
     try {
-      let state = setPassword({ cookieSecret: 'b'.repeat(32) }, 'persisted-pass')
+      let state = setPassword({ cookieSecret: 'b'.repeat(32), sessionEpoch: 0 }, 'persisted-pass')
       state = { ...state, cookieSecret: 'c'.repeat(32) }
       saveState(state, home)
 
@@ -196,6 +208,30 @@ describe('password state', () => {
     try {
       const state = loadState(home)
       expect(state.cookieSecret.length).toBeGreaterThanOrEqual(16)
+      expect(state.password).toBeUndefined()
+      expect(state.sessionEpoch).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('setting and clearing the password bump the session epoch', () => {
+    let state = setPassword({ cookieSecret: 'a'.repeat(32), sessionEpoch: 0 }, 'hunter2')
+    expect(state.sessionEpoch).toBe(1)
+    const cleared = setPassword(state, undefined)
+    expect(cleared.sessionEpoch).toBe(2)
+    expect(cleared.password).toBeUndefined()
+  })
+
+  it('loads a pre-0.5.0 state file (no sessionEpoch) as epoch 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-gw-migrate-'))
+    const home = join(dir, 'fake-home')
+    try {
+      mkdirSync(stateDir(home), { recursive: true })
+      writeFileSync(join(stateDir(home), 'state.json'), JSON.stringify({ cookieSecret: 'e'.repeat(32) }))
+      const state = loadState(home)
+      expect(state.cookieSecret).toBe('e'.repeat(32))
+      expect(state.sessionEpoch).toBe(0)
       expect(state.password).toBeUndefined()
     } finally {
       rmSync(dir, { recursive: true, force: true })

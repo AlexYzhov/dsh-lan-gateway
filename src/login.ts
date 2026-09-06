@@ -11,6 +11,9 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:
 /** Path the gateway owns and never forwards. */
 export const LOGIN_PATH = '/__login' as const
 
+/** Path the gateway owns and never forwards: signs the session out. */
+export const LOGOUT_PATH = '/__logout' as const
+
 /** The cookie name used for the signed session. */
 export const COOKIE_NAME = 'dsh_gw_auth' as const
 

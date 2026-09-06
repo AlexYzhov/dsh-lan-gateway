@@ -27,20 +27,24 @@ export function lanGatewayTool(control: GatewayController): ToolDefinition {
     description:
       'Manage the LAN/internet gateway for this DeepSeek Harness web GUI. '
       + '`status` shows whether the gateway is listening, on which port, toward which dsh port, '
-      + 'whether a password is set, the trusted LAN CIDRs, and the TLS state. `enable` starts '
-      + 'listening on 0.0.0.0 (loopback and LAN sources need no password; anything else must sign '
-      + 'in). `disable` stops listening. `set-password` sets (or, with an empty password, clears) '
-      + 'the gateway password for non-LAN access. `rotate-secret` invalidates every issued login '
-      + 'cookie. `tls-regenerate` mints a fresh self-signed certificate (tlsMode must be '
-      + 'self-signed) and restarts the listener.',
+      + 'whether a password is set, the ingress/TLS state, and the upstream-session-relay state. '
+      + '`enable` starts listening on 0.0.0.0 — a password is required, and by default every source '
+      + '(loopback, LAN, internet) must sign in; set lanPasswordless to exempt LAN/loopback. The '
+      + 'listener also refuses to run over plaintext unless TLS, a declared trustedTerminator, or an '
+      + 'explicit allowInsecurePlaintext opt-in is present. `disable` stops listening. `set-password` '
+      + 'sets (or, with an empty password, clears) the gateway password; changing it revokes every '
+      + 'existing session, and clearing it stops the listener. `rotate-secret` invalidates every '
+      + 'issued login cookie and live WebSocket. `tls-regenerate` mints a fresh self-signed '
+      + 'certificate (tlsMode must be self-signed) and restarts the listener.',
     parameters: {
       command: {
         type: 'string',
         enum: ['status', 'enable', 'disable', 'set-password', 'rotate-secret', 'tls-regenerate'],
         description:
           '`status` (default) — report gateway state. `enable` / `disable` — start or stop the '
-          + 'listener. `set-password` — set or clear the login password. `rotate-secret` — '
-          + 'invalidate all existing sessions. `tls-regenerate` — mint a new self-signed certificate.',
+          + 'listener. `set-password` — set or clear the login password (setting revokes all '
+          + 'sessions; clearing stops the listener). `rotate-secret` — invalidate all existing '
+          + 'sessions. `tls-regenerate` — mint a new self-signed certificate.',
       },
       password: {
         type: 'string',

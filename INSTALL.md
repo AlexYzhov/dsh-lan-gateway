@@ -97,14 +97,18 @@ dsh --profile web
 
 ### 6. 首次使用：设置密码（必做）
 
-网关默认 `authRequired: true`——非 LAN 来源必须登录。未设密码时 `lan_gateway
-enable` 会**拒绝监听**（防止把 RCE 门户开放给非 LAN 来源）。让 agent 执行：
+网关**恒要求密码**：所有来源（loopback / LAN / 公网）默认都必须登录；未设密码时
+`lan_gateway enable` 会**拒绝监听**（防止把 RCE 门户开放给任何非本机来源）。让 agent
+执行：
 
 - `lan_gateway set-password` 且 `password: <≥8 位密码>`——设置登录密码。
-- `lan_gateway enable`——开启监听。
+- `lan_gateway enable`——开启监听。若仍被拒，按报错提示满足启动条件：删除遗留的
+  `authRequired: false`（v0.5 起认证恒为必需）、提供加密入口（`tlsEnabled` /
+  `trustedTerminator` / 显式 `allowInsecurePlaintext: true`）、底座需 ≥ 0.1.2-rc.1
+  才能开 `lanPasswordless`。
 
-> 只有把 `authRequired` 配成 `false` 才会允许无密码监听，仅适合完全受信的 LAN
-> 环境。
+> LAN 想免登录是**显式 opt-in**：设 `lanPasswordless: true`（默认 `false`）只豁免网关
+> 登录页，且需要 dsh ≥ 0.1.2-rc.1 的上游会话认证底座；底座不支持时该开关会被拒绝启用。
 
 ---
 
@@ -150,7 +154,7 @@ cd dsh-lan-gateway
 pnpm install
 pnpm build          # host：lib/index.js + lib/index.d.ts
 pnpm build:client   # client：lib/client.js（window.__ModuleLoader__ 格式）
-pnpm test           # 39 项（网关 23 + UUID shim 3 + x509 6 + TLS 7）
+pnpm test           # 72 项（网关单元 27 + start-guard 12 + 集成 17 + UUID shim 3 + x509 6 + TLS 7）
 ```
 
 构建产物在 `lib/`（已被 `.gitignore` 排除，不随仓库提交）。

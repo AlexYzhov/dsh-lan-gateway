@@ -1,7 +1,10 @@
 # dsh-lan-gateway bundle patch: inserts the gateway plugin into a profile's layer stack.
 # Disabled by default (safe): the gateway only opens a network port once `lan_gateway
-# enable` is run through the tool. Composition-level settings live here; secrets
-# (password hash, cookie secret) live in ~/.dsh/lan-gateway/state.json, never in config.
+# enable` is run through the tool (or `enabled: true` is set here). Composition-level
+# settings live here; secrets (password hash, cookie secret) live in ~/.dsh/lan-gateway/
+# state.json, never in config. Secure defaults inherited from the plugin schema:
+# auth is required for every source (lanPasswordless: false), the listener refuses
+# plaintext (allowInsecurePlaintext: false) unless TLS or trustedTerminator is set.
 - insert:
     - id: dsh-lan-gateway
       name: '@riceawa/dsh-lan-gateway'

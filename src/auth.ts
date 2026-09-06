@@ -114,16 +114,29 @@ function base64url(input: Buffer): string {
  * Issue a signed session cookie value.
  * @param secret - the HMAC signing secret (base64 string).
  * @param expiresMs - epoch millis at which the session expires.
+ * @param epoch - the session revocation epoch the cookie is minted under; a
+ *   cookie whose epoch no longer matches the live state is rejected by
+ *   {@link verifyCookie}. Defaults to 0 (epoch-less, legacy) for callers that
+ *   do not participate in revocation.
  * @returns a `payload.signature` string suitable for the cookie value.
  */
-export function signCookie(secret: string, expiresMs: number): string {
-  const payload = base64url(Buffer.from(JSON.stringify({ exp: expiresMs })))
+export function signCookie(secret: string, expiresMs: number, epoch: number = 0): string {
+  const payload = base64url(Buffer.from(JSON.stringify({ exp: expiresMs, epoch })))
   const sig = createHmac('sha256', secret).update(payload).digest('base64url')
   return `${payload}.${sig}`
 }
 
-/** Whether a cookie value is a valid, unexpired session signed with `secret`. */
-export function verifyCookie(secret: string, value: string | undefined, now: number): boolean {
+/**
+ * Whether a cookie value is a valid, unexpired session signed with `secret`
+ * and minted under `epoch`. Epoch-less cookies (legacy payloads) count as
+ * epoch 0, so an upgrade from a pre-0.5.0 state does not log everyone out.
+ */
+export function verifyCookie(
+  secret: string,
+  value: string | undefined,
+  now: number,
+  epoch: number = 0,
+): boolean {
   if (value === undefined) return false
   const dot = value.indexOf('.')
   if (dot === -1) return false
@@ -139,8 +152,28 @@ export function verifyCookie(secret: string, value: string | undefined, now: num
   if (expected.length !== actual.length) return false
   if (!timingSafeEqual(expected, actual)) return false
   try {
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown }
-    return typeof decoded.exp === 'number' && decoded.exp > now
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { exp?: unknown; epoch?: unknown }
+    if (typeof decoded.exp !== 'number' || decoded.exp <= now) return false
+    const cookieEpoch = typeof decoded.epoch === 'number' ? decoded.epoch : 0
+    return cookieEpoch === epoch
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether a browser Origin header names the same authority (hostname:port) as
+ * a request Host header. Both sides run through WHATWG URL parsing so case and
+ * an implicit scheme-default port never decide the match — the comparison the
+ * gateway uses to tell same-origin browser requests from cross-site ones.
+ * @param origin - the `Origin` header value, or undefined.
+ * @param host - the `Host` header value, or undefined.
+ * @returns true only when both parse and name the same host[:port].
+ */
+export function originMatchesHost(origin: string | undefined, host: string | undefined): boolean {
+  if (origin === undefined || host === undefined) return false
+  try {
+    return new URL(origin).host === new URL(`http://${host}`).host
   } catch {
     return false
   }

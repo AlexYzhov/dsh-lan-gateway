@@ -1,16 +1,31 @@
 /**
- * The reverse-proxy gateway: a `node:http` server bound to `0.0.0.0` that
- * forwards every request to the loopback dsh web server, rewriting Host and
- * Origin so the dsh `/api` trust fence (which only trusts loopback) passes.
+ * The reverse-proxy gateway: a `node:http(s)` server bound to `0.0.0.0` that
+ * forwards every request to the loopback dsh web server.
  *
- * Security model:
+ * Security model (post-QVD / session-base):
  * - Source is classified from `socket.remoteAddress` only (never
- *   `X-Forwarded-For`). LAN/loopback sources are proxied without a password;
- *   anything else must present a valid signed cookie or complete the login.
+ *   `X-Forwarded-For`). Classification alone grants nothing: by default every
+ *   source — loopback, LAN, internet — must present a valid gateway session.
+ *   `lanPasswordless` (an explicit opt-in, false by default) is the one way a
+ *   LAN/loopback source skips the gateway login, and it is only ever allowed
+ *   against a session-capable dsh base (enforced by the plugin, which owns the
+ *   fail-closed guard).
+ * - The gateway never forwards its own management surface (`/lan-gateway/*`)
+ *   or its login/logout paths; those are handled locally or refused.
  * - Because this gateway rewrites Origin to loopback, dsh's own CSRF fence is
- *   blinded — so the gateway runs its own origin check on `/api*` requests
- *   BEFORE rewriting (reject `sec-fetch-site: cross-site` and any Origin that
- *   does not match the gateway authority the browser actually used).
+ *   blinded — so the gateway runs its own origin check on every relayed
+ *   request (HTTP and WebSocket upgrade) BEFORE rewriting: reject
+ *   `sec-fetch-site: cross-site`, reject any Origin that does not name the
+ *   gateway authority the browser actually used, and require an Origin on
+ *   state-changing methods and on every WebSocket upgrade.
+ * - Against a session-capable dsh base the Host/Origin rewrite alone would
+ *   still earn a 401 (dsh no longer trusts a loopback Host; it demands its own
+ *   authority-bound session cookie). The gateway therefore relays one shared
+ *   upstream session acquired through the launch-token exchange and replays it
+ *   on every forwarded request. See `upstream-session.ts`.
+ * - Sessions carry a revocation epoch: a password change or secret rotation
+ *   bumps the epoch, every previously issued cookie dies, and established
+ *   WebSockets are torn down so the client re-authenticates.
  *
  * @module @riceawa/dsh-lan-gateway/gateway
  */
@@ -20,20 +35,22 @@ import https from 'node:https'
 import type { Duplex } from 'node:stream'
 import {
   classifySource,
+  originMatchesHost,
   RateLimiter,
   signCookie,
   verifyCookie,
   type SourceClass,
 } from './auth.ts'
 import {
-  COOKIE_NAME,
   LOGIN_PATH,
+  LOGOUT_PATH,
   readBody,
   renderLoginPage,
   serveLoginGet,
   type LoginPageOptions,
 } from './login.ts'
 import { verifyPassword, type GatewayState } from './state.ts'
+import type { UpstreamSession } from './upstream-session.ts'
 
 /** Configuration the gateway needs at listen time. */
 export interface GatewayConfig {
@@ -41,21 +58,41 @@ export interface GatewayConfig {
   gatewayPort: number
   /** The loopback dsh web server port to forward to. */
   dshPort: number
-  /** LAN CIDRs treated as password-free. */
+  /** LAN CIDRs that may be treated as trusted (descriptive; see `lanPasswordless`). */
   lanCidrs: readonly string[]
-  /** Whether non-LAN sources require a password. */
-  authRequired: boolean
+  /** Whether LAN/loopback sources may skip the gateway login (explicit opt-in). */
+  lanPasswordless: boolean
   /** Cookie lifetime in days. */
   cookieMaxAgeDays: number
   /** Cookie name. */
   cookieName: string
-  /** PEM cert/key material; when present the listener speaks HTTPS. */
+  /** Whether the ingress is encrypted (self TLS or a declared trusted terminator); adds `Secure` to cookies. */
+  secureCookies: boolean
+  /** PEM cert/key material; when present the listener speaks HTTPS (and sends HSTS). */
   tls?: { cert: string; key: string }
+  /** Optional injectable source classifier (integration tests emulate LAN/internet). */
+  classifySource?: (req: http.IncomingMessage) => SourceClass
+  /** Optional shared upstream session relayed onto every forwarded request. */
+  upstreamSession?: UpstreamSession
 }
 
 const DEFAULT_BODY_LIMIT_BYTES = 64 * 1024
 const LOGIN_ATTEMPTS_LIMIT = 5
 const LOGIN_ATTEMPTS_WINDOW_MS = 60_000
+
+/** Methods a browser never attaches a CSRF-meaningful body to; safe without an Origin. */
+const READ_ONLY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+/** Prefixes the gateway owns and must never relay to dsh. */
+function isOwnedPath(pathname: string): boolean {
+  return pathname === '/lan-gateway' || pathname.startsWith('/lan-gateway/')
+}
+
+/** The pathname of a request URL (query string stripped, not decoded). */
+function pathOf(url: string): string {
+  const query = url.indexOf('?')
+  return query === -1 ? url : url.slice(0, query)
+}
 
 /**
  * The running gateway: owns the HTTP server and the auth state needed per
@@ -67,8 +104,13 @@ export class LanGateway {
   private readonly loginLimiter = new RateLimiter(LOGIN_ATTEMPTS_LIMIT, LOGIN_ATTEMPTS_WINDOW_MS)
   private state: GatewayState
   private disposed = false
+  /** Established WebSockets (upgraded client sockets), torn down on session-epoch change. */
+  private readonly activeDuplexes = new Set<Duplex>()
 
-  constructor(private readonly config: GatewayConfig, state: GatewayState) {
+  constructor(
+    private readonly config: GatewayConfig,
+    state: GatewayState,
+  ) {
     this.state = state
     const handle = (req: http.IncomingMessage, res: http.ServerResponse): void => {
       void this.handleHttp(req, res)
@@ -81,8 +123,11 @@ export class LanGateway {
     })
   }
 
-  /** Replace the in-memory state (e.g. after a password change). */
+  /** Replace the in-memory state; bumps of `sessionEpoch` revoke live sessions and sockets. */
   setState(state: GatewayState): void {
+    if (state.sessionEpoch !== this.state.sessionEpoch) {
+      this.destroyActiveDuplexes()
+    }
     this.state = state
   }
 
@@ -103,18 +148,35 @@ export class LanGateway {
     })
   }
 
-  /** Close the server and stop accepting connections. */
+  /** Close the server, drop upgraded sockets, and stop accepting connections. */
   async close(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.destroyActiveDuplexes()
     return new Promise((resolve) => {
       this.server.close(() => resolve())
       this.server.closeAllConnections()
     })
   }
 
-  private sourceClass(req: http.IncomingMessage): SourceClass {
-    return classifySource(req.socket.remoteAddress, this.config.lanCidrs)
+  private destroyActiveDuplexes(): void {
+    for (const socket of this.activeDuplexes) {
+      socket.destroy()
+    }
+    this.activeDuplexes.clear()
+  }
+
+  private trackDuplex(socket: Duplex): void {
+    this.activeDuplexes.add(socket)
+    socket.on('close', () => {
+      this.activeDuplexes.delete(socket)
+    })
+  }
+
+  private sourceOf(req: http.IncomingMessage): SourceClass {
+    return this.config.classifySource !== undefined
+      ? this.config.classifySource(req)
+      : classifySource(req.socket.remoteAddress, this.config.lanCidrs)
   }
 
   /** Parse the session cookie out of a Cookie header. */
@@ -130,10 +192,20 @@ export class LanGateway {
     return undefined
   }
 
-  /** Whether a request carries a valid session for its source. */
+  /** Whether a request carries a session valid under the current epoch. */
   private authorized(req: http.IncomingMessage): boolean {
     const cookie = this.sessionCookie(req)
-    return cookie !== undefined && verifyCookie(this.state.cookieSecret, cookie, Date.now())
+    return cookie !== undefined && verifyCookie(
+      this.state.cookieSecret,
+      cookie,
+      Date.now(),
+      this.state.sessionEpoch,
+    )
+  }
+
+  /** Whether this source must present a gateway session (default: everyone). */
+  private requiresLogin(source: SourceClass): boolean {
+    return !(this.config.lanPasswordless && source !== 'internet')
   }
 
   private serveUnauthorized(res: http.ServerResponse, limited: boolean): void {
@@ -154,58 +226,71 @@ export class LanGateway {
     res.end(renderLoginPage(opts))
   }
 
-  /** HSTS when the listener is HTTPS (never sent on plain HTTP). */
+  /** HSTS when the listener itself is HTTPS (never sent on plain HTTP). */
   private securityHeaders(): http.OutgoingHttpHeaders {
     return this.config.tls === undefined
       ? {}
       : { 'strict-transport-security': 'max-age=15552000' }
   }
 
-  /** Handle one HTTP request: auth gate → CSRF fence → forward. */
+  /**
+   * The gateway's own cross-site gate, shared by HTTP and WebSocket upgrades
+   * and applied before any Host/Origin rewriting. Browsers attach Origin to
+   * state-changing requests and to every WebSocket handshake; reads without an
+   * Origin (navigations, non-browser clients holding a session) stay allowed.
+   */
+  private sameSiteAllowed(req: http.IncomingMessage, upgrade: boolean): boolean {
+    const headers = req.headers
+    if (headers['sec-fetch-site'] === 'cross-site') return false
+    const origin = headers.origin
+    const host = headers.host
+    if (origin !== undefined && !originMatchesHost(origin, host)) return false
+    if (upgrade) return origin !== undefined
+    if (!READ_ONLY_METHODS.has(req.method ?? 'GET')) return origin !== undefined
+    return true
+  }
+
+  private sessionSetCookie(value: string, maxAgeSeconds: number): string {
+    const attributes = `Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}`
+    return `${this.config.cookieName}=${value}; ${attributes}${this.config.secureCookies ? '; Secure' : ''}`
+  }
+
+  /** Handle one HTTP request: anonymous allowlist → owned-path refuse → session gate → same-site gate → relay. */
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const source = this.sourceClass(req)
     const url = req.url ?? '/'
-    const pathname = url.split('?')[0] ?? '/'
+    const pathname = pathOf(url)
+    const source = this.sourceOf(req)
 
     if (pathname === LOGIN_PATH) {
       this.handleLogin(req, res)
       return
     }
-
-    if (source === 'internet' && this.config.authRequired) {
-      if (!this.authorized(req)) {
-        this.serveUnauthorized(res, false)
-        return
-      }
+    if (pathname === LOGOUT_PATH) {
+      this.handleLogout(req, res)
+      return
     }
 
-    // CSRF fence for /api before any rewriting (see module docs).
-    if (pathname === '/api' || pathname.startsWith('/api/')) {
-      if (!this.passesCsrfFence(req)) {
-        res.writeHead(403, this.securityHeaders())
-        res.end('forbidden')
-        return
-      }
+    // The gateway's own management surface never reaches dsh: an unauthenticated
+    // remote request must not be able to touch the loopback-only config route by
+    // having the gateway rewrite Host to loopback for it.
+    if (isOwnedPath(pathname)) {
+      res.writeHead(403, this.securityHeaders())
+      res.end('forbidden')
+      return
     }
 
-    this.forward(req, res, url)
-  }
-
-  /** Reject cross-site API traffic: the gateway's own origin check. */
-  private passesCsrfFence(req: http.IncomingMessage): boolean {
-    const headers = req.headers
-    if (headers['sec-fetch-site'] === 'cross-site') return false
-    const origin = headers.origin
-    if (origin === undefined) return true
-    try {
-      const originHost = new URL(origin).host
-      const requestHost = typeof headers.host === 'string' ? headers.host : ''
-      // Compare with the gateway authority the browser actually used; a
-      // browser always fills Host from the URL it loaded.
-      return originHost === requestHost || originHost === stripDefaultPort(requestHost)
-    } catch {
-      return false
+    if (this.requiresLogin(source) && !this.authorized(req)) {
+      this.serveUnauthorized(res, false)
+      return
     }
+
+    if (!this.sameSiteAllowed(req, false)) {
+      res.writeHead(403, this.securityHeaders())
+      res.end('forbidden')
+      return
+    }
+
+    await this.relayHttp(req, res, url)
   }
 
   /** Handle the login GET form / POST submission. */
@@ -216,7 +301,7 @@ export class LanGateway {
       return
     }
     if (req.method !== 'POST') {
-      res.writeHead(405, { allow: 'GET, POST' })
+      res.writeHead(405, { allow: 'GET, HEAD, POST' })
       res.end()
       return
     }
@@ -240,22 +325,41 @@ export class LanGateway {
         this.serveLoginError(res, 'Incorrect password.')
         return
       }
-      const expiresMs = Date.now() + this.config.cookieMaxAgeDays * 86_400_000
-      const cookie = signCookie(this.state.cookieSecret, expiresMs)
-      const secure = this.config.tls !== undefined ? '; Secure' : ''
+      const maxAgeSeconds = this.config.cookieMaxAgeDays * 86_400
+      const expiresMs = Date.now() + maxAgeSeconds * 1000
+      const cookie = signCookie(this.state.cookieSecret, expiresMs, this.state.sessionEpoch)
       res.writeHead(302, {
         location: '/',
         ...this.securityHeaders(),
-        'set-cookie': [
-          `${this.config.cookieName}=${cookie}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${this.config.cookieMaxAgeDays * 86_400}${secure}`,
-        ],
+        'set-cookie': [this.sessionSetCookie(cookie, maxAgeSeconds)],
       })
       res.end()
     })
   }
 
-  /** Forward an HTTP request to dsh, rewriting Host/Origin to loopback. */
-  private forward(req: http.IncomingMessage, res: http.ServerResponse, url: string): void {
+  /** POST /__logout: sign an immediately-expired cookie and bounce to / . */
+  private handleLogout(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    // A logout is a state change: refuse cross-site triggers.
+    if (!this.sameSiteAllowed(req, false)) {
+      res.writeHead(403, this.securityHeaders())
+      res.end('forbidden')
+      return
+    }
+    res.writeHead(302, {
+      location: '/',
+      ...this.securityHeaders(),
+      'set-cookie': [this.sessionSetCookie('', 0)],
+    })
+    res.end()
+  }
+
+  /** Build the outbound headers: rewrite Host/Origin to the loopback upstream. */
+  private upstreamHeaders(req: http.IncomingMessage, keepUpgrade: boolean): http.OutgoingHttpHeaders {
     const headers: http.OutgoingHttpHeaders = { ...req.headers }
     headers.host = `127.0.0.1:${this.config.dshPort}`
     if (typeof headers.origin === 'string') {
@@ -263,7 +367,32 @@ export class LanGateway {
     }
     // Hop-by-hop headers the gateway must not forward.
     delete headers['proxy-connection']
-    delete headers.connection
+    if (!keepUpgrade) {
+      delete headers.connection
+      delete headers.upgrade
+    }
+    return headers
+  }
+
+  /** Attach the shared upstream session cookie to the outbound headers, if any. */
+  private attachUpstreamSession(headers: http.OutgoingHttpHeaders): boolean {
+    const session = this.config.upstreamSession
+    if (session === undefined) return false
+    const cookie = session.peek()
+    if (cookie === undefined) return false
+    const existing = headers.cookie
+    headers.cookie = typeof existing === 'string' && existing !== ''
+      ? `${existing}; ${cookie}`
+      : cookie
+    return true
+  }
+
+  /** Forward an HTTP request to dsh, replaying the shared upstream session. */
+  private async relayHttp(req: http.IncomingMessage, res: http.ServerResponse, url: string): Promise<void> {
+    const session = this.config.upstreamSession
+    if (session !== undefined) await session.cookie()
+    const headers = this.upstreamHeaders(req, false)
+    const attached = this.attachUpstreamSession(headers)
 
     const proxyReq = http.request({
       host: '127.0.0.1',
@@ -272,6 +401,12 @@ export class LanGateway {
       path: url,
       headers,
     }, (proxyRes) => {
+      // A 401 while we relayed an upstream session means upstream revoked it
+      // (secret/epoch change on its side): drop our copy so the next request
+      // re-acquires through the launch-token exchange.
+      if (attached && session !== undefined && proxyRes.statusCode === 401) {
+        session.invalidate()
+      }
       res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers)
       proxyRes.pipe(res)
     })
@@ -284,34 +419,50 @@ export class LanGateway {
     req.pipe(proxyReq)
   }
 
-  /** Forward a WebSocket upgrade, splicing the raw duplex through to dsh. */
-  private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
-    const source = this.sourceClass(req)
-    if (source === 'internet' && this.config.authRequired && !this.authorized(req)) {
-      socket.write(
-        'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n',
-      )
+  /** Forward a WebSocket upgrade through the same gates, splicing the duplex to dsh. */
+  private async handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const url = req.url ?? '/'
+    const pathname = pathOf(url)
+    const source = this.sourceOf(req)
+
+    const refuse = (status: number): void => {
+      socket.write(`HTTP/1.1 ${status} ${status === 401 ? 'Unauthorized' : 'Forbidden'}\r\nConnection: close\r\n\r\n`)
       socket.destroy()
+    }
+
+    // Login/logout and the gateway's own surface are not upgrade targets.
+    if (pathname === LOGIN_PATH || pathname === LOGOUT_PATH || isOwnedPath(pathname)) {
+      refuse(403)
       return
     }
 
-    const headers: http.OutgoingHttpHeaders = { ...req.headers }
-    headers.host = `127.0.0.1:${this.config.dshPort}`
-    if (typeof headers.origin === 'string') {
-      headers.origin = `http://127.0.0.1:${this.config.dshPort}`
+    if (this.requiresLogin(source) && !this.authorized(req)) {
+      refuse(401)
+      return
     }
-    // Unlike the plain-HTTP path, keep Connection: Upgrade / Upgrade: websocket
-    // so dsh answers with 101 and node's client emits 'upgrade'.
-    delete headers['proxy-connection']
+
+    // Upgrades are state changes that only browsers meaningfully make: require
+    // a same-origin Origin so a cross-site page cannot open a socket that rides
+    // the requester's ambient session.
+    if (!this.sameSiteAllowed(req, true)) {
+      refuse(403)
+      return
+    }
+
+    const session = this.config.upstreamSession
+    if (session !== undefined) await session.cookie()
+    const headers = this.upstreamHeaders(req, true)
+    this.attachUpstreamSession(headers)
 
     const proxyReq = http.request({
       host: '127.0.0.1',
       port: this.config.dshPort,
       method: 'GET',
-      path: req.url ?? '/',
+      path: url,
       headers,
     })
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+      this.trackDuplex(socket)
       // node's http client has already consumed the 101 response headers, so
       // reconstruct them on the client socket before splicing.
       const statusLine = `HTTP/1.1 ${proxyRes.statusCode ?? 101} ${proxyRes.statusMessage ?? 'Switching Protocols'}\r\n`
@@ -333,11 +484,4 @@ export class LanGateway {
     proxyReq.on('error', () => socket.destroy())
     proxyReq.end()
   }
-}
-
-/** Strip an explicit default port from a Host authority, if present. */
-function stripDefaultPort(host: string): string {
-  const parsed = /^(.+?)(?::(\d+))?$/.exec(host)
-  if (parsed?.[2] === '80' || parsed?.[2] === '443') return parsed[1]!
-  return host
 }

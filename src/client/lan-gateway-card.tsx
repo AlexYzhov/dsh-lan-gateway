@@ -36,7 +36,7 @@ export interface LanGatewaySettings {
   gatewayPort?: number
   dshTargetPort?: number
   lanCidrs?: string[]
-  authRequired?: boolean
+  lanPasswordless?: boolean
   cookieMaxAgeDays?: number
   tlsEnabled?: boolean
   tlsMode?: 'self-signed' | 'custom'
@@ -44,6 +44,8 @@ export interface LanGatewaySettings {
   tlsKeyPath?: string
   tlsSelfSignedHosts?: string
   tlsCertMaxAgeDays?: number
+  allowInsecurePlaintext?: boolean
+  trustedTerminator?: string
 }
 
 /** GET /lan-gateway/config response. */
@@ -106,8 +108,12 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'hint.dshTargetPort': '留空则自动跟随 dsh web 端口（默认 3080）',
     'field.lanCidrs': '免密 LAN 网段',
     'hint.lanCidrs': '逗号分隔的 CIDR，如 10.0.0.0/8, 192.168.0.0/16',
-    'field.authRequired': '非 LAN 访问需要密码',
-    'hint.authRequired': '公网来源必须登录后才能访问',
+    'field.lanPasswordless': 'LAN 免登录',
+    'hint.lanPasswordless': 'LAN/回环来源跳过网关登录页，但仍共用同一上游会话（需 dsh ≥ 0.1.2）',
+    'field.allowInsecurePlaintext': '允许明文 HTTP',
+    'hint.allowInsecurePlaintext': '危险：关闭 TLS 或受信终止代理时仍启动监听，密码与会话将以明文传输',
+    'field.trustedTerminator': '受信 TLS 终止代理',
+    'hint.trustedTerminator': '可选：声明前置代理标识，视为加密入口（如 nginx）。留空 = 未声明',
     'field.cookieMaxAgeDays': '会话有效期（天）',
     'hint.cookieMaxAgeDays': '登录 cookie 的存活天数（默认 7）',
     'field.tlsEnabled': '启用 TLS（HTTPS）',
@@ -148,8 +154,12 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'hint.dshTargetPort': 'Leave empty to follow the dsh web port (default 3080)',
     'field.lanCidrs': 'Password-free LAN CIDRs',
     'hint.lanCidrs': 'Comma separated CIDRs, e.g. 10.0.0.0/8, 192.168.0.0/16',
-    'field.authRequired': 'Password required for non-LAN',
-    'hint.authRequired': 'Internet sources must sign in before reaching the GUI',
+    'field.lanPasswordless': 'LAN skip login',
+    'hint.lanPasswordless': 'LAN/loopback sources skip the gateway login page but still ride one shared upstream session (needs dsh >= 0.1.2)',
+    'field.allowInsecurePlaintext': 'Allow plaintext HTTP',
+    'hint.allowInsecurePlaintext': 'Dangerous: start the listener even without TLS or a trusted terminator; passwords and sessions travel in clear',
+    'field.trustedTerminator': 'Trusted TLS terminator',
+    'hint.trustedTerminator': 'Optional identifier for a front proxy (e.g. nginx) treated as the encrypted ingress. Empty = none declared',
     'field.cookieMaxAgeDays': 'Session lifetime (days)',
     'hint.cookieMaxAgeDays': 'Login cookie lifetime (default 7)',
     'field.tlsEnabled': 'Enable TLS (HTTPS)',
@@ -190,7 +200,7 @@ const FIELDS: readonly FieldDef[] = [
   { field: 'gatewayPort', kind: 'number' },
   { field: 'dshTargetPort', kind: 'number', optional: true },
   { field: 'lanCidrs', kind: 'cidrs' },
-  { field: 'authRequired', kind: 'boolean' },
+  { field: 'lanPasswordless', kind: 'boolean' },
   { field: 'cookieMaxAgeDays', kind: 'number' },
   { field: 'tlsEnabled', kind: 'boolean' },
   { field: 'tlsMode', kind: 'select', options: ['self-signed', 'custom'] },
@@ -198,6 +208,8 @@ const FIELDS: readonly FieldDef[] = [
   { field: 'tlsCertPath', kind: 'text', optional: true },
   { field: 'tlsKeyPath', kind: 'text', optional: true },
   { field: 'tlsCertMaxAgeDays', kind: 'number' },
+  { field: 'allowInsecurePlaintext', kind: 'boolean' },
+  { field: 'trustedTerminator', kind: 'text', optional: true },
 ]
 
 function formatValue(def: FieldDef, value: unknown): string {
