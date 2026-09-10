@@ -42,7 +42,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
+import { type SettingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_LAN_CIDR_STRINGS, originMatchesHost } from './auth.ts'
 import { LanGateway } from './gateway.ts'
 import { readBody } from './login.ts'
@@ -161,7 +161,7 @@ export interface Config {
 }
 
 /** The `lan-gateway` user-settings namespace, mirroring the composition schema. */
-const NS = settingsNamespace('lan-gateway')
+const NS = 'lan-gateway' as SettingsNamespace
 
 /** Optional config keys: an empty submitted value clears them back to the composition layer. */
 const OPTIONAL_CONFIG_KEYS = new Set(['dshTargetPort', 'tlsCertPath', 'tlsKeyPath', 'trustedTerminator'])

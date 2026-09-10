@@ -1,2 +1,10 @@
 allowBuilds:
   esbuild: true
+overrides:
+  # Dev-graph alignment after the dsh-settings 0.1.2-generation bump
+  # (workspace-only; not published, does not affect consumers):
+  # - cordis@4.0.2 wants the 1.0.7/1.0.3 plugin peers; the older
+  #   0.1.0-rc.6 packages only asked for ^1.0.6/^1.0.2, so 1.0.7/1.0.3
+  #   satisfies every consumer in the graph.
+  '@deepseek-ai/cordis-plugin-include': 1.0.7
+  '@deepseek-ai/cordis-plugin-loader': 1.0.3
