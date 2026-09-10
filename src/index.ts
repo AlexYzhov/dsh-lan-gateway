@@ -422,9 +422,11 @@ export function apply(ctx: Context, config: Config): void {
   // gateway forwards without a relay, and lanPasswordless stays refused.
   ctx.inject(['connection'], (ccx) => {
     upstreamSessionAvailable = true
+    ctx.logger.info('dsh-lan-gateway: connection service attached; upstream session relay enabled')
     makeRelay = (dshPort) => new UpstreamSessionRelay({
       port: dshPort,
       authenticatedUrl: () => ccx.connection.authenticatedUrl(`http://127.0.0.1:${dshPort}`),
+      log: (message) => ctx.logger.info(`dsh-lan-gateway relay: ${message}`),
     })
     // A listener that started before the connection service appeared must
     // restart so it picks up the relay (and the now-correct fail-closed facts).
