@@ -158,6 +158,14 @@ export interface Config {
    * encrypted-ingress gate) without this listener sending HSTS.
    */
   trustedTerminator?: string
+  /**
+   * Explicit override for the session-cookie `Secure` attribute. Unset =
+   * automatic: Secure when the gateway serves TLS itself or a
+   * `trustedTerminator` is declared. Set `false` when the trusted proxy
+   * fronts a plaintext browser ingress — browsers refuse Secure cookies over
+   * plain HTTP, and every login would bounce back to the login page.
+   */
+  secureCookies?: boolean
 }
 
 /** The `lan-gateway` user-settings namespace, mirroring the composition schema. */
@@ -184,6 +192,7 @@ export const Config: z<Config> = z.object({
   tlsCertMaxAgeDays: z.natural().min(1).max(3650).default(825),
   allowInsecurePlaintext: z.boolean().default(false),
   trustedTerminator: z.string(),
+  secureCookies: z.boolean(),
 })
 
 /** Facts the fail-closed start guard needs to judge a config. */
@@ -222,6 +231,17 @@ export function gatewayStartProblems(cfg: Config, facts: StartFacts): string[] {
   return problems
 }
 
+/**
+ * Resolve the effective session-cookie `Secure` attribute: an explicit
+ * `secureCookies` wins; otherwise automatic — Secure when the gateway serves
+ * TLS itself or a trusted TLS-terminating proxy is declared. Exported for
+ * tests.
+ */
+export function resolveSecureCookies(cfg: Pick<Config, 'secureCookies' | 'tlsEnabled' | 'trustedTerminator'>): boolean {
+  if (cfg.secureCookies !== undefined) return cfg.secureCookies
+  return cfg.tlsEnabled || cfg.trustedTerminator !== undefined
+}
+
 /** Resolve the TLS material for a config, or undefined when TLS is off. */
 function resolveTls(cfg: Config): TlsMaterial | undefined {
   if (!cfg.tlsEnabled) return undefined
@@ -253,6 +273,7 @@ function listenerKey(cfg: Config): string {
     cfg.tlsCertMaxAgeDays,
     cfg.allowInsecurePlaintext,
     cfg.trustedTerminator,
+    cfg.secureCookies,
   ])
 }
 
@@ -339,6 +360,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
     const tls = resolveTls(cfg)
+    const secureCookies = resolveSecureCookies(cfg)
     const encryptedIngress = cfg.tlsEnabled || cfg.trustedTerminator !== undefined
     const next = new LanGateway({
       gatewayPort: cfg.gatewayPort,
@@ -347,7 +369,7 @@ export function apply(ctx: Context, config: Config): void {
       lanPasswordless: cfg.lanPasswordless,
       cookieMaxAgeDays: cfg.cookieMaxAgeDays,
       cookieName: cfg.cookieName,
-      secureCookies: encryptedIngress,
+      secureCookies,
       ...(tls !== undefined ? { tls } : {}),
       ...(makeRelay !== undefined ? { upstreamSession: makeRelay(dshPort) } : {}),
     }, state)
@@ -547,9 +569,8 @@ export function apply(ctx: Context, config: Config): void {
           + `\n- password: ${state.password !== undefined ? 'set' : 'NOT SET'}`
           + `\n- login required for all sources: true${cfg.lanPasswordless ? ' (LAN/loopback exempt via lanPasswordless)' : ''}`
           + `\n- session epoch: ${state.sessionEpoch}`
-          + `\n- upstream session relay: ${upstreamSessionAvailable ? 'active (dsh browser-session auth present)' : 'absent (older dsh base)'}`
-          + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `TLS terminated by trusted proxy (${cfg.trustedTerminator})` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
-          + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d`
+          + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `trusted proxy (${cfg.trustedTerminator}, ${resolveSecureCookies(cfg) ? 'TLS' : 'plaintext'})` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
+          + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d, ${resolveSecureCookies(cfg) ? 'Secure' : 'no Secure attribute (plaintext browser ingress)'}`
           + (manualOverride !== undefined
             ? `\n- manual override: ${manualOverride ? 'enabled' : 'disabled'}`
             : '')

@@ -149,6 +149,7 @@ lan_gateway disable
 | `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天） |
 | `allowInsecurePlaintext` | `false` | 显式 opt-in：允许明文 HTTP 监听（见下「入口加密」） |
 | `trustedTerminator` | — | 声明一个受信 TLS 终止代理标识，视为加密入口（如 `nginx`） |
+| `secureCookies` | 自动 | 会话 cookie 的 `Secure` 属性显式开关；默认自动（`tlsEnabled` 或声明 `trustedTerminator` 即为 true）。受信代理只做明文鉴权、不终止 TLS 时设 `false`（浏览器拒收明文 http 上的 Secure cookie，否则登录无限循环） |
 
 > v0.5.0 起 `authRequired` 被移除：认证恒为必需。若配置里残留 `authRequired: false`
 > （v0.4 及更早的写法），启停守卫会拒绝并提示迁移——不会静默降级回“免密”。
@@ -190,8 +191,11 @@ lan_gateway disable
     tlsKeyPath: /etc/letsencrypt/live/example.com/privkey.pem
 ```
 
-启用 TLS（或声明受信终止代理）后，登录 cookie 自动带 `Secure`；监听器自身是 HTTPS 时，
-网关响应（登录页 / 重定向 / 拒绝）带 HSTS。自签名证书首次访问会看到浏览器警告，属预期行为。
+启用 TLS（或声明受信终止代理）后，登录 cookie 自动带 `Secure`；若受信代理只做明文
+用户鉴权、并不终止 TLS（浏览器走 http 访问），需显式 `secureCookies: false`——否则
+浏览器拒收明文 http 上的 Secure cookie，每次登录都会弹回 `/__login`。监听器自身是
+HTTPS 时，网关响应（登录页 / 重定向 / 拒绝）带 HSTS。自签名证书首次访问会看到浏览器
+警告，属预期行为。
 
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`；
 IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8` / `::1` 归类为 LAN/loopback。

@@ -11,7 +11,7 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_LAN_CIDR_STRINGS } from '../src/auth.ts'
-import { gatewayStartProblems, isTrustedConfigRequest, type Config } from '../src/index.ts'
+import { gatewayStartProblems, isTrustedConfigRequest, resolveSecureCookies, type Config } from '../src/index.ts'
 
 /** A fully-defaulted Config so a test only overrides what it is judging. */
 function baseConfig(over: Partial<Config> = {}): Config {
@@ -112,5 +112,27 @@ describe('isTrustedConfigRequest (loopback config-route fence)', () => {
 
   it('refuses requests with no Host header at all', () => {
     expect(isTrustedConfigRequest(fakeReq({}))).toBe(false)
+  })
+})
+
+describe('resolveSecureCookies', () => {
+  it('auto: plaintext without a terminator has no Secure attribute', () => {
+    expect(resolveSecureCookies(baseConfig({ allowInsecurePlaintext: true }))).toBe(false)
+  })
+
+  it('auto: a declared trusted terminator implies Secure', () => {
+    expect(resolveSecureCookies(baseConfig({ trustedTerminator: 'nginx' }))).toBe(true)
+  })
+
+  it('auto: self TLS implies Secure', () => {
+    expect(resolveSecureCookies(baseConfig({ tlsEnabled: true }))).toBe(true)
+  })
+
+  it('explicit false wins over a declared terminator (plaintext proxy front)', () => {
+    expect(resolveSecureCookies(baseConfig({ trustedTerminator: 'nginx', secureCookies: false }))).toBe(false)
+  })
+
+  it('explicit true wins over a plaintext ingress', () => {
+    expect(resolveSecureCookies(baseConfig({ allowInsecurePlaintext: true, secureCookies: true }))).toBe(true)
   })
 })
