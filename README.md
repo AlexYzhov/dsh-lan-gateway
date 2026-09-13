@@ -12,29 +12,29 @@
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
 </p>
 
-`dsh web` 硬拒绝 `--host 0.0.0.0`，怕把远程代码执行暴露到网络。这个插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个监听 `0.0.0.0` 的反向代理，转发到 loopback 端口并改写 `Host` / `Origin`。
+`dsh web` 明确拒绝 `--host 0.0.0.0`，以免把远程代码执行暴露到网络。本插件的做法是让 dsh 继续只绑 `127.0.0.1`，另起一个监听 `0.0.0.0` 的反向代理，转发到 loopback 端口并改写 `Host` / `Origin`。
 
-默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页拿到 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座是 dsh ≥ 0.1.2-rc.1 时（含 QVD-2026-57410 的上游修复），网关在进程内中继一条共享上游会话，上游自己的授权仍然把关每个请求，网关只决定谁能骑上这条会话。
+默认拒绝：loopback、LAN、公网三种来源都要先在网关登录页取得 HMAC 会话 cookie，LAN 免密需要显式打开 `lanPasswordless`，默认关闭。底座为 dsh ≥ 0.1.2-rc.1 时（含 QVD-2026-57410 的上游修复），网关在进程内中继一条共享上游会话，上游自身的授权仍然把关每个请求，网关只决定谁可以使用这条会话。
 
-插件还捎带两件事：
+插件另外提供两项功能：
 
-- **不安全源 UUID shim**：网关以纯 HTTP 的局域网地址服务页面，浏览器视其为不安全源，不提供 `crypto.randomUUID`。client bundle 在页面加载早期补一个基于 `getRandomValues` 的实现，工作区才打得开。
-- **TLS**：自动生成并持久化的自签名证书，或者挂载你自己签发的 PEM。自签名证书首次访问会有浏览器警告，正常现象。
+- **不安全源 UUID shim**：网关以纯 HTTP 的局域网地址服务页面，浏览器视其为不安全源，不提供 `crypto.randomUUID`。client bundle 在页面加载早期补一个基于 `getRandomValues` 的实现，工作区才能正常打开。
+- **TLS**：自动生成并持久化的自签名证书，或者挂载自行签发的 PEM。自签名证书首次访问会有浏览器警告，属预期行为。
 
 ## 安装
 
-已发布到 npm，装的是预构建产物，不需要 `allowBuilds` 授权。把这段话丢给你的 agent 就行：
+已发布到 npm，安装的是预构建产物，不需要 `allowBuilds` 授权。可将下面这段话交给你的 agent：
 
 > 帮我安装 dsh 插件 `@riceawa/dsh-lan-gateway`，遵循
 > `https://github.com/rice-awa/dsh-lan-gateway/blob/main/INSTALL.md`
 
-也可以自己敲：
+也可以手动执行：
 
 ```bash
 dsh plugin --profile web add @riceawa/dsh-lan-gateway
 ```
 
-`dsh plugin ... add` 会把参数转发给 profile 目录里的 pnpm。npm 包自带 `lib/`，不会触发 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。真报了错，就把报错条目写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 的 `allowBuilds` 重试，完整步骤见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
+`dsh plugin ... add` 会把参数转发给 profile 目录里的 pnpm。npm 包自带 `lib/`，不会触发 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。如果仍然报错，把报错条目写进 `~/.dsh/profiles/web/pnpm-workspace.yaml` 的 `allowBuilds` 后重试，完整步骤见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
 从源码构建：
 
@@ -47,9 +47,9 @@ pnpm build:client   # client → lib/client.js
 pnpm test           # 93 项
 ```
 
-仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，装上之后可以直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写配置也不回显。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
+仓库里还有一个 [lan-gateway](skills/lan-gateway.md) 技能，安装后可直接在 dsh 对话里说「设置网关密码为 …」「开启远程访问」，agent 会调用 `lan_gateway` 工具完成，密码以参数传入，不写入配置，也不回显。安装方式见 [INSTALL.md](INSTALL.md#for-agents完整安装流程)。
 
-手机 / 平板上访问的话，再搭一个 [dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile) 做移动端 UI 适配：
+如需在手机 / 平板上访问，可另外安装 [dsh-web-mobile](https://github.com/mexiaosqwq/dsh-web-mobile) 做移动端 UI 适配：
 
 ```bash
 dsh plugin --profile web add github:mexiaosqwq/dsh-web-mobile
@@ -66,11 +66,11 @@ lan_gateway tls-regenerate    # 换发自签名证书（tlsMode=self-signed 时�
 lan_gateway disable           # 关闭
 ```
 
-`lan_gateway` 是模型可调用的工具，上面这些命令不必自己敲。直接在对话里说「查看网关状态」「设置网关密码为 ……」即可，密码以参数传给模型，不会落进任何配置文件。
+`lan_gateway` 是模型可调用的工具，上述命令无需手动执行。直接在对话里说「查看网关状态」「设置网关密码为 ……」即可，密码以参数传给模型，不会写入任何配置文件。
 
 ## 配置
 
-所有可调项都暴露为 `lan-gateway` 用户设置命名空间。打开 **DSH 的 Settings → Plugins → 可配置插件**，展开「LAN 网关」卡片就能改，保存即生效，监听器会按新配置自动重启。下表既是卡片字段，也是配置键：
+所有可调项都暴露为 `lan-gateway` 用户设置命名空间。打开 **DSH 的 Settings → Plugins → 可配置插件**，展开「LAN 网关」卡片即可修改，保存即生效，监听器会按新配置自动重启。下表既是卡片字段，也是配置键：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -97,9 +97,9 @@ lan_gateway disable           # 关闭
 
 ### 入口加密
 
-网关默认拒绝纯明文监听，下面三条路任选一条才能启动：
+网关默认拒绝纯明文监听，以下三种方式任选其一方可启动：
 
-1. 启用 TLS，`tlsEnabled: true`。推荐，自签名或 custom 证书都行。
+1. 启用 TLS，`tlsEnabled: true`。推荐，自签名或 custom 证书均可。
 2. 声明由可信反向代理终止 TLS：
 
    ```yaml
@@ -120,7 +120,7 @@ lan_gateway disable           # 关闭
        allowInsecurePlaintext: true
    ```
 
-用自己的证书（比如 Let's Encrypt 签发的 PEM）：
+使用自有证书（例如 Let's Encrypt 签发的 PEM）：
 
 ```yaml
 - id: dsh-lan-gateway
@@ -131,15 +131,15 @@ lan_gateway disable           # 关闭
     tlsKeyPath: /etc/letsencrypt/live/example.com/privkey.pem
 ```
 
-自签名证书在首次启用 TLS 时生成一次，落到 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。要换新证书用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。
+自签名证书在首次启用 TLS 时生成一次，写入 `~/.dsh/lan-gateway/tls/`（`selfsigned.crt` / `selfsigned.key`，0600），之后重启复用。更换证书使用 `lan_gateway tls-regenerate`，它会换掉密钥并热重启监听器。
 
 监听器自身是 HTTPS 时，网关的响应（登录页 / 重定向 / 拒绝）带 HSTS。
 
 ### 关于 `Secure` cookie
 
-启用 TLS 或声明受信终止代理后，登录 cookie 自动带 `Secure`。但「声明了受信代理」只说明前面有个代理，不说明浏览器到代理这一段是加密的。
+启用 TLS 或声明受信终止代理后，登录 cookie 自动带 `Secure`。但「声明了受信代理」只说明网关前方存在一个代理，不说明浏览器到代理这一段是加密的。
 
-如果那个代理只做明文鉴权、浏览器以 `http://` 访问（代理再以明文转发回本端口），自动推断会把 `Secure` 加上，而浏览器拒收明文 http 上的 Secure cookie。结果是密码校验通过、cookie 存不下，每次都被弹回 `/__login`，无限循环。这种部署要显式关掉：
+如果该代理只做明文鉴权、浏览器以 `http://` 访问（代理再以明文转发回本端口），自动推断会把 `Secure` 加上，而浏览器拒收明文 http 上的 Secure cookie。结果是密码校验通过、cookie 无法保存，每次都被重定向回 `/__login`，无限循环。这种部署需要显式关闭：
 
 ```yaml
 - id: dsh-lan-gateway
@@ -150,24 +150,24 @@ lan_gateway disable           # 关闭
     secureCookies: false   # 浏览器 → nginx 是明文 http，不能带 Secure
 ```
 
-`lan_gateway status` 会如实报出实际生效的属性，以及声明的代理属于 TLS 还是明文入口。设置页里对应「自动 / 始终 Secure / 不加 Secure」三档。
+`lan_gateway status` 会如实报告实际生效的属性，以及声明的代理属于 TLS 还是明文入口。设置页里对应「自动 / 始终 Secure / 不加 Secure」三档。
 
-注意 `secureCookies: false` 说的是浏览器到入口那一段是明文，网关登录密码和会话 cookie 会在这一段明文传输。这跟 `allowInsecurePlaintext` 描述的不是同一段链路：后者指代理到网关之间不加密，前者指浏览器到代理之间不加密。只有当代理本身已经对用户完成鉴权、且你能接受这段明文时，才这么配。
+注意 `secureCookies: false` 说的是浏览器到入口这一段是明文，网关登录密码和会话 cookie 会在这一段明文传输。这与 `allowInsecurePlaintext` 描述的不是同一段链路：后者指代理到网关之间不加密，前者指浏览器到代理之间不加密。只有当代理本身已经对用户完成鉴权、且可以接受这段明文时，才应这样配置。
 
 ## 安全模型
 
 - **来源分级只认 `socket.remoteAddress`**（IPv4-mapped IPv6 会先解包），分 loopback / lan / internet 三档，绝不信任 `X-Forwarded-For`。分级本身不授予任何访问，每一档默认都要出示有效网关会话，否则 302 到 `/__login`。
-- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；底座 ≥ 0.1.2-rc.1 时上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等于把 QVD-2026-57410 原样装回去。
-- **共享上游会话中继**（dsh ≥ 0.1.2-rc.1）。dsh 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的人骑同一条上游会话，持钥的上游才是真正的授权主体。
+- **LAN 免密是显式 opt-in**。`lanPasswordless: true` 只让命中 `lanCidrs` 或 loopback 的来源跳过网关自己的登录页；底座 ≥ 0.1.2-rc.1 时上游会话仍把关每个请求。底座没有浏览器会话认证时这个开关拒绝启用，否则等同于把 QVD-2026-57410 原样恢复。
+- **共享上游会话中继**（dsh ≥ 0.1.2-rc.1）。dsh 不再信任回环 Host，要求出示 HMAC 签名的 `dsh-auth-*` cookie。插件经 `connection` 服务拿到启动令牌，在回环传输上做一次浏览器等价的令牌换取，取得 cookie 后中继到每个转发请求；上游一旦 401 就丢弃这条会话并重新换取。这仍是「单密码 = 单操作者」：通过网关登录的用户共用同一条上游会话，持钥的上游才是真正的授权主体。
 - **登录页**。`/__login` 由网关独占、不转发。密码以 scrypt 校验，每写一次重新加盐；登录尝试按来源限流（5 次 / 分钟）。
 - **会话 cookie** 是 `payload.signature` 结构（HMAC-SHA256），带撤销 epoch，`HttpOnly; SameSite=Strict`。改密、清密、`rotate-secret` 都会递增 epoch，作废全部已签发 cookie 并断开已建立的 WebSocket，客户端需要重新登录。清空密码会直接停止监听。
-- **管理面不外泄**。`/lan-gateway/*`（含配置路由）由网关独占、一律 403 不转发，远程访问者没法借网关改写 Host 去够到本机 loopback 的配置接口。原生 `/lan-gateway/config` 只应答回环 Host 且同源的请求。远程管理走 `lan_gateway` 工具。
+- **管理面不外泄**。`/lan-gateway/*`（含配置路由）由网关独占、一律 403 不转发，远程访问者无法借网关改写 Host 触及本机 loopback 的配置接口。原生 `/lan-gateway/config` 只应答回环 Host 且同源的请求。远程管理走 `lan_gateway` 工具。
 - **CSRF 围栏**（HTTP 与 WebSocket）。网关把 Origin 改写回 loopback，会蒙蔽 dsh 自身的 CSRF 防线，所以在改写前对每个转发请求自检：`sec-fetch-site: cross-site` 直接拒；Origin 必须匹配访问者实际使用的网关权威来源；状态变更方法与 WebSocket 升级请求必须携带同源 Origin，否则 403。
-- **没设密码就拒绝监听**，跟来源无关。
+- **未设置密码时拒绝监听**，与来源无关。
 
 ## 登录页
 
-远程来源打开 `http://<主机>:3081/` 时先看到网关自带的登录表单，输入正确密码后签发会话 cookie 并跳回 `/`。
+远程来源打开 `http://<主机>:3081/` 时先看到网关自带的登录表单，输入正确密码后签发会话 cookie 并跳转回 `/`。
 
 <p align="center">
   <img src="assets/login-screenshot.webp" alt="网关登录页截图" width="320" />
@@ -175,9 +175,9 @@ lan_gateway disable           # 关闭
 
 ## UUID shim
 
-网关以 `http://<LAN-IP>:3081` 服务页面，浏览器视其为不安全源，`crypto.randomUUID()`（仅安全源可用）为 `undefined`，于是每次 RPC id 铸造都抛 `crypto.randomUUID is not a function`，工作区打不开。
+网关以 `http://<LAN-IP>:3081` 服务页面，浏览器视其为不安全源，`crypto.randomUUID()`（仅安全源可用）为 `undefined`，于是每次 RPC id 铸造都抛 `crypto.randomUUID is not a function`，工作区无法打开。
 
-client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomValues()` 的 `randomUUID`（RFC 4122 v4，`getRandomValues` 在所有源都可用）。它在浏览器求值时就执行，早于任何官方代码铸造 id，所以对官方所有调用点（含以后新增的）一律生效，不用改 DSH 源码。安全源和 Node ≥ 19 下是 no-op，不影响任何行为。
+client bundle 在模块级给 `Crypto` 原型补一个基于 `crypto.getRandomValues()` 的 `randomUUID`（RFC 4122 v4，`getRandomValues` 在所有源都可用）。它在浏览器求值时就执行，早于任何官方代码铸造 id，所以对官方所有调用点（含以后新增的）一律生效，无需修改 DSH 源码。安全源和 Node ≥ 19 下是 no-op，不影响任何行为。
 
 ## 开发
 
