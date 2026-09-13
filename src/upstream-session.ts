@@ -65,6 +65,24 @@ function nameValueOnly(setCookie: string): string {
   return (semi === -1 ? setCookie : setCookie.slice(0, semi)).trim()
 }
 
+/** The cookie name of a `Set-Cookie` string (`''` when it is malformed). */
+function cookieNameOf(setCookie: string): string {
+  const eq = setCookie.indexOf('=')
+  return eq === -1 ? '' : setCookie.slice(0, eq).trim()
+}
+
+/**
+ * Whether a `Set-Cookie` string is the upstream browser-session cookie. The
+ * name upstream mints is `dsh-auth-<base64url(sha256(authority))>`: the prefix
+ * is followed by the authority hash, never by `=` itself, so the test is a
+ * prefix plus at least one character — matching on `dsh-auth-=` finds nothing
+ * and silently relays every request anonymously.
+ */
+function isUpstreamSessionCookie(setCookie: string): boolean {
+  const name = cookieNameOf(setCookie)
+  return name.startsWith(UPSTREAM_COOKIE_PREFIX) && name.length > UPSTREAM_COOKIE_PREFIX.length
+}
+
 /** Pull the Max-Age attribute (seconds) out of a Set-Cookie string, if any. */
 function maxAgeSeconds(setCookie: string): number | undefined {
   const match = /\bMax-Age=(\d+)\b/i.exec(setCookie)
@@ -111,7 +129,7 @@ function exchange(
         return
       }
       const raw = (Array.isArray(setCookies) ? setCookies : [setCookies])
-        .find((value) => value.startsWith(`${UPSTREAM_COOKIE_PREFIX}=`))
+        .find(isUpstreamSessionCookie)
       if (raw === undefined) {
         resolve(undefined)
         return

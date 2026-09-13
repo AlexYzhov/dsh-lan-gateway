@@ -241,8 +241,15 @@ function resolveTls(cfg: Config): TlsMaterial | undefined {
   return material
 }
 
-/** Config fields that require a listener restart when they change. */
-function listenerKey(cfg: Config): string {
+/**
+ * Config fields that require a listener restart when they change, plus whether
+ * a shared upstream session relay is available at all. The relay flag belongs
+ * in the key: a listener that started before the `connection` service appeared
+ * was built without a relay and must restart once the service attaches,
+ * otherwise it silently forwards every request anonymously (the upstream 401s)
+ * while the status line still claims the relay is active.
+ */
+function listenerKey(cfg: Config, relayAvailable: boolean): string {
   return JSON.stringify([
     cfg.gatewayPort,
     cfg.dshTargetPort,
@@ -258,6 +265,7 @@ function listenerKey(cfg: Config): string {
     cfg.tlsCertMaxAgeDays,
     cfg.allowInsecurePlaintext,
     cfg.trustedTerminator,
+    relayAvailable,
   ])
 }
 
@@ -358,7 +366,7 @@ export function apply(ctx: Context, config: Config): void {
     }, state)
     await next.listen()
     gateway = next
-    startedWith = listenerKey(cfg)
+    startedWith = listenerKey(cfg, makeRelay !== undefined)
     ctx.logger.info(
       `dsh-lan-gateway: listening on 0.0.0.0:${cfg.gatewayPort}${tls !== undefined ? ' (TLS)' : ''}`
       + ` -> 127.0.0.1:${dshPort}${encryptedIngress ? '' : ' (plaintext, explicit allowInsecurePlaintext)'}`
@@ -387,7 +395,7 @@ export function apply(ctx: Context, config: Config): void {
           if (shouldRun) await startGateway(cfg)
         } else if (!shouldRun) {
           await stopGateway()
-        } else if (startedWith !== listenerKey(cfg)) {
+        } else if (startedWith !== listenerKey(cfg, makeRelay !== undefined)) {
           await stopGateway()
           await startGateway(cfg)
         }

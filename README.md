@@ -229,6 +229,26 @@ IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8` / `::1` 归类为 LAN/loop
 - **WebSocket**：`/api` 升级请求同样过登录校验、同源 Origin 校验，再拼接转发给 dsh，
   并纳入会话撤销（epoch 变化即断开）。
 
+## 0.5.2：共享会话中继修复
+
+0.5.0 / 0.5.1 在 **dsh ≥ 0.1.2-rc.1** 上时，网关自己的登录能过，但每一个转发请求都被上游
+401 拒绝，浏览器只看到：
+
+```
+dsh web authentication required; reopen the URL printed by dsh web.
+```
+
+问题出在共享上游会话中继的 cookie 匹配：插件用 `dsh-auth-=` 这个前缀去找上游签发的会话
+cookie，而 dsh 实际签发的名字是 `dsh-auth-<base64url(sha256(authority))>` —— 前缀后面永远
+跟哈希而不是 `=`，匹配必然为空。令牌换取本身是好的（`GET /?token=…` 确实发出、也拿到了
+`Set-Cookie`），但那条 cookie 在这一步被丢弃，转发请求全部以匿名身份发出。0.5.2 改为
+「名字以 `dsh-auth-` 开头且后面还有内容」，并新增 `tests/upstream-session.test.ts`：用真实
+回环 HTTP 服务端跑完整换取链路（集成测试注入的是假会话对象，正好绕过了这段）。
+
+同一失效域还顺带修掉一个启动竞态：`listenerKey` 现在把「中继是否可用」计入重启判据。
+监听器若早于 `connection` 服务启动（因此没有中继），会在服务挂载后自动重启，而不是一直
+匿名转发、状态里却写着 relay active。
+
 ## 版本兼容（0.5.0 的加载失败与修复）
 
 0.5.0 及更早版本装在 **dsh ≥ 0.1.2-rc.1** 上会让整个 plugin tree 起不来：
@@ -311,6 +331,8 @@ pnpm test
 # ✓ tests/uuid-shim.test.ts             ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
 # ✓ tests/x509.test.ts                  ( 6) 自签名证书 DER/SAN/签名/TLS 握手
 # ✓ tests/tls.test.ts                   ( 7) 证书持久化 / 重生成 / 自定义证书加载
+# ✓ tests/upstream-session.test.ts      ( 4) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
+#                                            invalidate 重获取
 ```
 
 ## 安全评估与修复记录
