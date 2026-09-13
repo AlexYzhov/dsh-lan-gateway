@@ -46,6 +46,7 @@ export interface LanGatewaySettings {
   tlsCertMaxAgeDays?: number
   allowInsecurePlaintext?: boolean
   trustedTerminator?: string
+  secureCookies?: boolean
 }
 
 /** GET /lan-gateway/config response. */
@@ -80,6 +81,7 @@ interface Labels {
   lastError: string
   [key: `field.${string}`]: string
   [key: `hint.${string}`]: string
+  [key: `opt.${string}`]: string
 }
 
 const LABELS: Record<'zh' | 'en', Labels> = {
@@ -114,6 +116,11 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'hint.allowInsecurePlaintext': '危险：关闭 TLS 或受信终止代理时仍启动监听，密码与会话将以明文传输',
     'field.trustedTerminator': '受信 TLS 终止代理',
     'hint.trustedTerminator': '可选：声明前置代理标识，视为加密入口（如 nginx）。留空 = 未声明',
+    'field.secureCookies': '会话 cookie 的 Secure 属性',
+    'hint.secureCookies': '自动 = TLS 或已声明受信终止代理时加 Secure。受信代理只做明文鉴权、浏览器走 http 访问时须设为 false，否则浏览器拒收 Secure cookie，登录会无限弹回登录页',
+    'opt.auto': '自动',
+    'opt.true': '始终 Secure',
+    'opt.false': '不加 Secure（明文浏览器入口）',
     'field.cookieMaxAgeDays': '会话有效期（天）',
     'hint.cookieMaxAgeDays': '登录 cookie 的存活天数（默认 7）',
     'field.tlsEnabled': '启用 TLS（HTTPS）',
@@ -160,6 +167,11 @@ const LABELS: Record<'zh' | 'en', Labels> = {
     'hint.allowInsecurePlaintext': 'Dangerous: start the listener even without TLS or a trusted terminator; passwords and sessions travel in clear',
     'field.trustedTerminator': 'Trusted TLS terminator',
     'hint.trustedTerminator': 'Optional identifier for a front proxy (e.g. nginx) treated as the encrypted ingress. Empty = none declared',
+    'field.secureCookies': 'Session cookie Secure attribute',
+    'hint.secureCookies': 'Auto = Secure when TLS or a trusted terminator is declared. Set false when the trusted proxy only authenticates over plaintext and browsers reach it over http — otherwise browsers drop the Secure cookie and every login bounces back to the login page',
+    'opt.auto': 'Auto',
+    'opt.true': 'Always Secure',
+    'opt.false': 'No Secure (plaintext browser ingress)',
     'field.cookieMaxAgeDays': 'Session lifetime (days)',
     'hint.cookieMaxAgeDays': 'Login cookie lifetime (default 7)',
     'field.tlsEnabled': 'Enable TLS (HTTPS)',
@@ -186,7 +198,7 @@ function labels(): Labels {
 /* Field model                                                         */
 /* ------------------------------------------------------------------ */
 
-type FieldKind = 'boolean' | 'number' | 'text' | 'cidrs' | 'select'
+type FieldKind = 'boolean' | 'number' | 'text' | 'cidrs' | 'select' | 'tristate'
 
 interface FieldDef {
   field: keyof LanGatewaySettings
@@ -194,6 +206,18 @@ interface FieldDef {
   optional?: boolean
   options?: readonly string[]
 }
+
+/**
+ * The card's field table and its two value codecs are exported for tests: the
+ * tri-state codec is the load-bearing part of the settings round-trip (an
+ * unset value must stay distinguishable from an explicit false, or the
+ * plaintext-proxy escape hatch silently reverts).
+ */
+export { TRISTATE_OPTIONS, FIELDS, formatValue, parseValue }
+export type { FieldDef, Write }
+
+/** The three states of a tri-state field, in display order. */
+const TRISTATE_OPTIONS = ['auto', 'true', 'false'] as const
 
 const FIELDS: readonly FieldDef[] = [
   { field: 'enabled', kind: 'boolean' },
@@ -210,6 +234,7 @@ const FIELDS: readonly FieldDef[] = [
   { field: 'tlsCertMaxAgeDays', kind: 'number' },
   { field: 'allowInsecurePlaintext', kind: 'boolean' },
   { field: 'trustedTerminator', kind: 'text', optional: true },
+  { field: 'secureCookies', kind: 'tristate' },
 ]
 
 function formatValue(def: FieldDef, value: unknown): string {
@@ -218,6 +243,8 @@ function formatValue(def: FieldDef, value: unknown): string {
     case 'number': return typeof value === 'number' ? String(value) : ''
     case 'cidrs': return Array.isArray(value) ? value.join(', ') : ''
     case 'select': return typeof value === 'string' ? value : (def.options?.[0] ?? '')
+    // Tri-state: an unset value is a distinct third state ("auto"), never "false".
+    case 'tristate': return value === true ? 'true' : value === false ? 'false' : 'auto'
     case 'text': return typeof value === 'string' ? value : ''
   }
 }
@@ -242,6 +269,13 @@ function parseValue(def: FieldDef, text: string): Write | undefined {
     }
     case 'select':
       return def.options?.includes(trimmed) ? { kind: 'set', value: trimmed } : undefined
+    case 'tristate':
+      // 'auto' clears the key so it re-inherits the composition layer (and the
+      // resolution rule), which is what an unset tri-state means.
+      if (trimmed === 'auto') return { kind: 'clear' }
+      if (trimmed === 'true') return { kind: 'set', value: true }
+      if (trimmed === 'false') return { kind: 'set', value: false }
+      return undefined
     case 'text':
       return trimmed === '' ? (def.optional ? { kind: 'clear' } : undefined) : { kind: 'set', value: trimmed }
   }
@@ -384,6 +418,11 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
           </div>
         )
       case 'select':
+      case 'tristate': {
+        // A tri-state renders as a three-way select because neither a checkbox
+        // (cannot express "unset") nor a text field (cannot express false)
+        // distinguishes auto from an explicit false.
+        const options = def.kind === 'tristate' ? TRISTATE_OPTIONS : (def.options ?? [])
         return (
           <div style={styles.field}>
             <label style={styles.label} htmlFor={`lan-gw-${field}`}>{label}</label>
@@ -394,7 +433,11 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
               disabled={saving}
               onChange={(e: ChangeEvent<HTMLSelectElement>) => stage(field, e.target.value)}
             >
-              {def.options?.map(option => <option key={option} value={option}>{option}</option>)}
+              {options.map(option => (
+                <option key={option} value={option}>
+                  {def.kind === 'tristate' ? t[`opt.${option}`] : option}
+                </option>
+              ))}
             </select>
             <span style={styles.hint}>{hint}</span>
             <button
@@ -407,6 +450,7 @@ export function LanGatewayCard(_props: LanGatewayCardProps): ReactNode {
             </button>
           </div>
         )
+      }
       default:
         return (
           <div style={styles.field}>

@@ -158,6 +158,14 @@ export interface Config {
    * encrypted-ingress gate) without this listener sending HSTS.
    */
   trustedTerminator?: string
+  /**
+   * Explicit override for the session cookie's `Secure` attribute. Unset =
+   * automatic: Secure when the gateway serves TLS itself or a
+   * `trustedTerminator` is declared. Set `false` when the trusted proxy fronts
+   * a plaintext browser ingress — browsers refuse to store a Secure cookie over
+   * plain HTTP, so every login would bounce straight back to `/__login`.
+   */
+  secureCookies?: boolean
 }
 
 /**
@@ -189,6 +197,7 @@ export const Config: z<Config> = z.object({
   tlsCertMaxAgeDays: z.natural().min(1).max(3650).default(825),
   allowInsecurePlaintext: z.boolean().default(false),
   trustedTerminator: z.string(),
+  secureCookies: z.boolean(),
 })
 
 /** Facts the fail-closed start guard needs to judge a config. */
@@ -225,6 +234,28 @@ export function gatewayStartProblems(cfg: Config, facts: StartFacts): string[] {
     )
   }
   return problems
+}
+
+/**
+ * Resolve the effective `Secure` attribute for the session cookie: an explicit
+ * `secureCookies` always wins; unset falls back to automatic — Secure when the
+ * gateway terminates TLS itself or a trusted terminator is declared. The
+ * override exists for a trusted proxy that authenticates users but speaks plain
+ * HTTP to browsers: `encryptedIngress` is a fair proxy for "a proxy is in front"
+ * but not for "the browser leg is encrypted", and a Secure cookie on a plain
+ * HTTP origin is silently dropped, looping the login.
+ *
+ * Exported for tests.
+ */
+export function resolveSecureCookies(
+  cfg: Pick<Config, 'secureCookies' | 'tlsEnabled' | 'trustedTerminator'>,
+): boolean {
+  // Test for a real boolean, not just `!== undefined`: the settings route
+  // clears a key by posting null and schemastery passes that through rather
+  // than coercing it to undefined, so `null` reaches here on the save path.
+  // Only an explicit true/false overrides the automatic rule.
+  if (typeof cfg.secureCookies === 'boolean') return cfg.secureCookies
+  return cfg.tlsEnabled || cfg.trustedTerminator !== undefined
 }
 
 /** Resolve the TLS material for a config, or undefined when TLS is off. */
@@ -265,6 +296,7 @@ function listenerKey(cfg: Config, relayAvailable: boolean): string {
     cfg.tlsCertMaxAgeDays,
     cfg.allowInsecurePlaintext,
     cfg.trustedTerminator,
+    cfg.secureCookies,
     relayAvailable,
   ])
 }
@@ -353,6 +385,7 @@ export function apply(ctx: Context, config: Config): void {
     const dshPort = cfg.dshTargetPort ?? ctx.webServer.port
     const tls = resolveTls(cfg)
     const encryptedIngress = cfg.tlsEnabled || cfg.trustedTerminator !== undefined
+    const secureCookies = resolveSecureCookies(cfg)
     const next = new LanGateway({
       gatewayPort: cfg.gatewayPort,
       dshPort,
@@ -360,7 +393,7 @@ export function apply(ctx: Context, config: Config): void {
       lanPasswordless: cfg.lanPasswordless,
       cookieMaxAgeDays: cfg.cookieMaxAgeDays,
       cookieName: cfg.cookieName,
-      secureCookies: encryptedIngress,
+      secureCookies,
       ...(tls !== undefined ? { tls } : {}),
       ...(makeRelay !== undefined ? { upstreamSession: makeRelay(dshPort) } : {}),
     }, state)
@@ -435,9 +468,13 @@ export function apply(ctx: Context, config: Config): void {
   // gateway forwards without a relay, and lanPasswordless stays refused.
   ctx.inject(['connection'], (ccx) => {
     upstreamSessionAvailable = true
+    ctx.logger.info('dsh-lan-gateway: connection service attached; upstream session relay enabled')
     makeRelay = (dshPort) => new UpstreamSessionRelay({
       port: dshPort,
       authenticatedUrl: () => ccx.connection.authenticatedUrl(`http://127.0.0.1:${dshPort}`),
+      // The relay never throws, so a failing exchange is otherwise invisible
+      // and looks exactly like a base with no browser sessions.
+      log: (message) => ctx.logger.info(`dsh-lan-gateway relay: ${message}`),
     })
     // A listener that started before the connection service appeared must
     // restart so it picks up the relay (and the now-correct fail-closed facts).
@@ -559,8 +596,8 @@ export function apply(ctx: Context, config: Config): void {
           + `\n- login required for all sources: true${cfg.lanPasswordless ? ' (LAN/loopback exempt via lanPasswordless)' : ''}`
           + `\n- session epoch: ${state.sessionEpoch}`
           + `\n- upstream session relay: ${upstreamSessionAvailable ? 'active (dsh browser-session auth present)' : 'absent (older dsh base)'}`
-          + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `TLS terminated by trusted proxy (${cfg.trustedTerminator})` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
-          + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d`
+          + `\n- ingress: ${cfg.tlsEnabled ? `TLS (${tlsStatusLine(cfg)})` : cfg.trustedTerminator !== undefined ? `trusted proxy (${cfg.trustedTerminator}, ${resolveSecureCookies(cfg) ? 'TLS' : 'plaintext'} browser ingress)` : encrypted ? 'encrypted' : cfg.allowInsecurePlaintext ? 'PLAINTEXT (explicit allowInsecurePlaintext)' : 'plaintext — will not start'}`
+          + `\n- session cookie: ${cfg.cookieName}, ${cfg.cookieMaxAgeDays}d, ${resolveSecureCookies(cfg) ? 'Secure' : 'no Secure attribute (plaintext browser ingress)'}`
           + (manualOverride !== undefined
             ? `\n- manual override: ${manualOverride ? 'enabled' : 'disabled'}`
             : '')

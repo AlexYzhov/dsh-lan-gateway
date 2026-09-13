@@ -149,6 +149,7 @@ lan_gateway disable
 | `tlsCertMaxAgeDays` | `825` | 自签名证书有效期（天） |
 | `allowInsecurePlaintext` | `false` | 显式 opt-in：允许明文 HTTP 监听（见下「入口加密」） |
 | `trustedTerminator` | — | 声明一个受信 TLS 终止代理标识，视为加密入口（如 `nginx`） |
+| `secureCookies` | 自动 | 会话 cookie 的 `Secure` 属性显式开关。默认自动：`tlsEnabled` 或已声明 `trustedTerminator` 即为 `true`。受信代理只做明文鉴权、浏览器走 http 访问时须设 `false`（浏览器拒收明文 http 上的 Secure cookie，否则登录会无限弹回 `/__login`） |
 
 > v0.5.0 起 `authRequired` 被移除：认证恒为必需。若配置里残留 `authRequired: false`
 > （v0.4 及更早的写法），启停守卫会拒绝并提示迁移——不会静默降级回“免密”。
@@ -193,6 +194,30 @@ lan_gateway disable
 启用 TLS（或声明受信终止代理）后，登录 cookie 自动带 `Secure`；监听器自身是 HTTPS 时，
 网关响应（登录页 / 重定向 / 拒绝）带 HSTS。自签名证书首次访问会看到浏览器警告，属预期行为。
 
+`Secure` 是**自动推断**的：`tlsEnabled` 或声明了 `trustedTerminator` 就为真。声明受信代理
+只说明「前面有个代理」，并不说明「浏览器到代理这一段是加密的」。若那个代理只做明文鉴权、
+浏览器以 `http://` 访问（代理再以明文转发回本端口），自动推断就会把 `Secure` 加上，而浏览器
+**拒收明文 http 上的 Secure cookie**——登录密码校验通过、cookie 却存不下，每次都被弹回
+`/__login`，形成无限循环。这种部署须显式关掉：
+
+```yaml
+- id: dsh-lan-gateway
+  config:
+    enabled: true
+    gatewayPort: 8080
+    trustedTerminator: nginx
+    secureCookies: false   # 浏览器 → nginx 是明文 http，不能带 Secure
+```
+
+`lan_gateway status` 会如实报告实际生效的属性（`Secure` / `no Secure attribute`）以及声明的
+代理属于 TLS 还是明文入口。留空 = 自动；设置页里对应「自动 / 始终 Secure / 不加 Secure」
+三档。
+
+> 注意：`secureCookies: false` 表示**浏览器到入口那一段是明文**，网关登录密码与会话 cookie
+> 会在该段上明文传输。这与 `allowInsecurePlaintext` 描述的是不同的一段链路：后者指
+> 「代理 → 网关」这一段不加密，前者指「浏览器 → 代理」这一段不加密。只有在代理本身已对用户
+> 完成鉴权、且你能接受该段明文时才这样配。
+
 默认 `lanCidrs`：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`169.254.0.0/16`；
 IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8` / `::1` 归类为 LAN/loopback。
 
@@ -228,6 +253,26 @@ IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8` / `::1` 归类为 LAN/loop
   开放给任何非本机来源。
 - **WebSocket**：`/api` 升级请求同样过登录校验、同源 Origin 校验，再拼接转发给 dsh，
   并纳入会话撤销（epoch 变化即断开）。
+
+## 0.5.3：明文代理入口的登录死循环修复
+
+声明了 `trustedTerminator`、但那个代理只做明文用户鉴权（浏览器以 `http://` 访问代理）时，
+输入正确密码也会立刻弹回 `/__login`，形成无限循环：密码校验本身是通过的，是 cookie 存不下。
+
+原因是 `trustedTerminator` 被**无条件**当成加密入口，登录 cookie 一律加 `Secure`；而浏览器
+拒收明文 http 上的 Secure cookie，于是会话在登录跳转之间就丢了。0.5.3 新增 `secureCookies`
+配置项显式覆盖该属性（留空 = 自动，即原来的推断规则），设置页对应「自动 / 始终 Secure /
+不加 Secure」三档。`lan_gateway status` 现在报告实际生效的属性，以及声明的代理属于 TLS 还是
+明文入口，不再一律写「TLS terminated by trusted proxy」。
+
+同时补上共享会话中继的可观测性：中继从不抛异常（换取失败就退回匿名转发），这让「cookie 名字
+不对」「上游不可达」和「底座根本没有浏览器会话」三种情况在日志里长得一模一样。现在给
+`UpstreamSessionRelay` 接了 `ctx.logger`，每次换取都记录结果，失败时还会列出上游实际返回的
+cookie 名字。另外修掉一处小失效：`authenticatedUrl()` 瞬时不可用时不再把已持有的会话丢掉
+（那会以匿名身份转发并必然 401），而是继续使用仍可能有效的会话。
+
+> `secureCookies: false` 描述的是「浏览器 → 入口」这一段明文，与 `allowInsecurePlaintext`
+> 描述的「代理 → 网关」是两段不同的链路，两者互不替代。安全模型见上「入口加密」。
 
 ## 0.5.2：共享会话中继修复
 
@@ -325,14 +370,16 @@ cordis 的 include 一旦失败会连坐整棵树，所以表现是**所有插�
 ```bash
 pnpm test
 # ✓ tests/gateway.test.ts               (27) 分类 / HMAC cookie / epoch / 密码状态 / 限流
-# ✓ tests/start-guard.test.ts           (12) fail-closed 启动守卫 / 配置路由回环围栏
+# ✓ tests/start-guard.test.ts           (19) fail-closed 启动守卫 / 配置路由回环围栏 /
+#                                            Secure cookie 属性推断（含 null 清除路径）
 # ✓ tests/integration/gateway.test.ts   (17) 真实网关端到端：全来源登录 / LAN 豁免 /
 #                                            跨站 403 / 升级拒绝 / cookie 属性 / epoch 撤销 / 会话中继
 # ✓ tests/uuid-shim.test.ts             ( 3) 不安全源补丁 / 安全源 no-op / v4 正确性
 # ✓ tests/x509.test.ts                  ( 6) 自签名证书 DER/SAN/签名/TLS 握手
 # ✓ tests/tls.test.ts                   ( 7) 证书持久化 / 重生成 / 自定义证书加载
-# ✓ tests/upstream-session.test.ts      ( 4) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
-#                                            invalidate 重获取
+# ✓ tests/upstream-session.test.ts      ( 8) 真实回环令牌换取：cookie 名匹配 / 拒绝后重换 /
+#                                            invalidate 重获取 / 日志播报 / 保住已持有会话
+# ✓ tests/settings-card.test.ts         ( 6) 设置页字段编解码：三态 auto ↔ false 不可混淆
 ```
 
 ## 发布流程

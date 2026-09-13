@@ -35,10 +35,13 @@ interface FakeUpstream {
  * cookie name for whatever authority the request names, exactly as
  * `BrowserAuth.authorizeIndex` does.
  */
-async function fakeUpstream(options: { outcome?: Outcome; value?: string } = {}): Promise<FakeUpstream> {
+async function fakeUpstream(options: { outcome?: Outcome; value?: string; maxAge?: number } = {}): Promise<FakeUpstream> {
   const observed: FakeUpstream['seen'] = []
   let outcome: Outcome = options.outcome ?? 'mint'
   let value = options.value ?? 'v1.payload.sig'
+  // A short Max-Age puts the relay inside its 60s pre-expiry refresh window,
+  // so the next cookie() re-acquires instead of serving the cached value.
+  const maxAge = options.maxAge ?? 604800
   const server = http.createServer((req, res) => {
     observed.push({ url: req.url, host: req.headers.host })
     if (outcome === 'refuse') {
@@ -55,7 +58,7 @@ async function fakeUpstream(options: { outcome?: Outcome; value?: string } = {})
     const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
     res.writeHead(303, {
       location: '/',
-      'set-cookie': [`${name}=${value}; Max-Age=604800; Path=/; HttpOnly; SameSite=Strict`],
+      'set-cookie': [`${name}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Strict`],
     })
     res.end()
   })
@@ -148,5 +151,83 @@ describe('UpstreamSessionRelay', () => {
     upstream.value = 'v1.rotated.sig'
     expect(await relay.cookie()).toBe(`${name}=v1.rotated.sig`)
     expect(upstream.seen).toHaveLength(2)
+  })
+})
+
+describe('UpstreamSessionRelay logging', () => {
+  /**
+   * A relay that captures its log lines. Takes the fake as a parameter and
+   * closes over that local, not the module-level `upstream` — a closure over
+   * the reassignable module binding is `FakeUpstream | undefined` to tsc.
+   */
+  function loggingRelay(
+    fake: FakeUpstream,
+    authenticatedUrl: () => string | undefined,
+    lines: string[],
+  ): UpstreamSessionRelay {
+    return new UpstreamSessionRelay({
+      port: fake.port,
+      authority: fake.authority,
+      authenticatedUrl,
+      log: (message) => lines.push(message),
+    })
+  }
+
+  it('reports the exchange outcome and the cookie it accepted', async () => {
+    const fake = await fakeUpstream()
+    upstream = fake
+    const lines: string[] = []
+    const relay = loggingRelay(fake, () => `http://${fake.authority}/?token=launch-token`, lines)
+
+    await relay.cookie()
+    expect(lines.some(line => line.includes('acquiring session from'))).toBe(true)
+    expect(lines.some(line => line.includes('got dsh-auth-') && line.includes('maxAge='))).toBe(true)
+    expect(lines).toContain('session acquired and cached')
+  })
+
+  it('names the cookies it saw when none is the upstream session', async () => {
+    // The whole point of the sink: a mis-named cookie is otherwise
+    // indistinguishable from a base that has no browser sessions at all.
+    const fake = await fakeUpstream({ outcome: 'other' })
+    upstream = fake
+    const lines: string[] = []
+    const relay = loggingRelay(fake, () => `http://${fake.authority}/?token=launch-token`, lines)
+
+    expect(await relay.cookie()).toBeUndefined()
+    expect(lines.some(line => line.includes('no dsh-auth-* cookie; got:'))).toBe(true)
+  })
+
+  it('keeps the held session when authenticatedUrl() is transiently unavailable', async () => {
+    // Inside the refresh window on every call, so cookie() reaches doExchange.
+    const fake = await fakeUpstream({ maxAge: 30 })
+    upstream = fake
+    let url: string | undefined = `http://${fake.authority}/?token=launch-token`
+    const lines: string[] = []
+    const relay = loggingRelay(fake, () => url, lines)
+    const name = `dsh-auth-${createHash('sha256').update(fake.authority).digest('base64url')}`
+
+    expect(await relay.cookie()).toBe(`${name}=v1.payload.sig`)
+
+    // The connection service drops out mid-flight. Dropping to undefined here
+    // would forward with no cookie and draw a 401, so the held session rides.
+    url = undefined
+    fake.value = 'v1.rotated.sig'
+    expect(await relay.cookie()).toBe(`${name}=v1.payload.sig`)
+    expect(lines.some(line => line.includes('authenticatedUrl() returned undefined'))).toBe(true)
+    expect(fake.seen).toHaveLength(1)
+  })
+
+  it('logs an invalidation only when a session was actually held', async () => {
+    const fake = await fakeUpstream()
+    upstream = fake
+    const lines: string[] = []
+    const relay = loggingRelay(fake, () => `http://${fake.authority}/?token=launch-token`, lines)
+
+    relay.invalidate()
+    expect(lines).toEqual([])
+
+    await relay.cookie()
+    relay.invalidate()
+    expect(lines).toContain('invalidating held session (upstream rejected it)')
   })
 })

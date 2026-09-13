@@ -57,6 +57,14 @@ export interface UpstreamSessionRelayOptions {
    * upstream restart is picked up.
    */
   authenticatedUrl: () => string | undefined
+  /**
+   * Optional low-frequency debug sink: one line per acquisition attempt,
+   * exchange outcome, and invalidation. Every other failure path here is
+   * silent by design (the relay never throws), which makes a mis-named cookie
+   * or an unreachable upstream indistinguishable from "the base has no
+   * browser sessions" — wire `ctx.logger` to make that visible.
+   */
+  log?: (message: string) => void
 }
 
 /** Split `name=value; Path=/; …` into the `name=value` request-Cookie fragment. */
@@ -106,12 +114,14 @@ function exchange(
   url: string,
   authority: string,
   port: number,
+  log: (message: string) => void,
 ): Promise<ExchangeResult | undefined> {
   return new Promise((resolve) => {
     let target: URL
     try {
       target = new URL(url)
     } catch {
+      log(`exchange: unparseable authenticatedUrl ${url}`)
       resolve(undefined)
       return
     }
@@ -125,21 +135,33 @@ function exchange(
       const setCookies = response.headers['set-cookie']
       response.resume() // drain so the socket can be reused
       if (setCookies === undefined) {
+        log(`exchange ${target.pathname} -> ${response.statusCode} (no set-cookie)`)
         resolve(undefined)
         return
       }
-      const raw = (Array.isArray(setCookies) ? setCookies : [setCookies])
-        .find(isUpstreamSessionCookie)
+      const all = Array.isArray(setCookies) ? setCookies : [setCookies]
+      const raw = all.find(isUpstreamSessionCookie)
       if (raw === undefined) {
+        // Name what did come back: a missing session cookie is otherwise
+        // indistinguishable from an upstream that mints a differently-named one.
+        const names = all.map(cookieNameOf).filter((name) => name !== '')
+        log(`exchange ${target.pathname} -> ${response.statusCode} (no ${UPSTREAM_COOKIE_PREFIX}* cookie; got: ${names.join(', ') || 'none'})`)
         resolve(undefined)
         return
       }
       const header = nameValueOnly(raw)
       const maxAge = maxAgeSeconds(raw)
+      log(`exchange ${target.pathname} -> ${response.statusCode} (got ${cookieNameOf(raw)}, maxAge=${maxAge ?? 'n/a'})`)
       resolve({ header, expiresAt: Date.now() + (maxAge ?? 0) * 1000 })
     })
-    request.on('error', () => resolve(undefined))
-    request.setTimeout(5000, () => request.destroy(new Error('upstream-session exchange timeout')))
+    request.on('error', (error: Error) => {
+      log(`exchange error: ${error.message}`)
+      resolve(undefined)
+    })
+    request.setTimeout(5000, () => {
+      log('exchange timeout (5s)')
+      request.destroy(new Error('upstream-session exchange timeout'))
+    })
     request.end()
   })
 }
@@ -153,6 +175,7 @@ export class UpstreamSessionRelay implements UpstreamSession {
   private readonly port: number
   private readonly authority: string
   private readonly authenticatedUrl: () => string | undefined
+  private readonly log: (message: string) => void
   private held: HeldCookie | undefined
   private inflight: Promise<string | undefined> | undefined
 
@@ -160,6 +183,7 @@ export class UpstreamSessionRelay implements UpstreamSession {
     this.port = options.port
     this.authority = options.authority ?? `127.0.0.1:${options.port}`
     this.authenticatedUrl = options.authenticatedUrl
+    this.log = options.log ?? (() => { /* no debug sink configured */ })
   }
 
   /** Whether the held session is still comfortably inside its lifetime. */
@@ -176,6 +200,7 @@ export class UpstreamSessionRelay implements UpstreamSession {
   }
 
   invalidate(): void {
+    if (this.held !== undefined) this.log('invalidating held session (upstream rejected it)')
     this.held = undefined
   }
 
@@ -195,9 +220,22 @@ export class UpstreamSessionRelay implements UpstreamSession {
 
   private async doExchange(): Promise<string | undefined> {
     const url = this.authenticatedUrl()
-    if (url === undefined) return undefined
-    const result = await exchange(url, this.authority, this.port)
-    if (result !== undefined) this.held = result
+    if (url === undefined) {
+      // The launch URL is transiently unavailable (e.g. the connection service
+      // is mid-restart). Keep whatever is held: returning undefined here would
+      // forward with no cookie at all and draw a 401 upstream, which is worse
+      // than riding a session that is probably still valid.
+      this.log('authenticatedUrl() returned undefined; keeping current session')
+      return this.held?.header
+    }
+    this.log(`acquiring session from ${url}`)
+    const result = await exchange(url, this.authority, this.port, this.log)
+    if (result !== undefined) {
+      this.held = result
+      this.log('session acquired and cached')
+    } else {
+      this.log('exchange failed; keeping current session')
+    }
     // On a transient failure keep whatever session is still held rather than
     // dropping to anonymous.
     return this.held?.header

@@ -5,6 +5,6 @@
     "jsx": "react-jsx",
     "types": ["react"]
   },
-  "include": ["src/client", "tests/uuid-shim.test.ts"],
+  "include": ["src/client", "tests/uuid-shim.test.ts", "tests/settings-card.test.ts"],
   "exclude": []
 }

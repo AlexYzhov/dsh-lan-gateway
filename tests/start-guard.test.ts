@@ -11,10 +11,10 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_LAN_CIDR_STRINGS } from '../src/auth.ts'
-import { gatewayStartProblems, isTrustedConfigRequest, type Config } from '../src/index.ts'
+import { Config, gatewayStartProblems, isTrustedConfigRequest, resolveSecureCookies, type Config as GatewayConfig } from '../src/index.ts'
 
 /** A fully-defaulted Config so a test only overrides what it is judging. */
-function baseConfig(over: Partial<Config> = {}): Config {
+function baseConfig(over: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
     enabled: true,
     gatewayPort: 3081,
@@ -112,5 +112,40 @@ describe('isTrustedConfigRequest (loopback config-route fence)', () => {
 
   it('refuses requests with no Host header at all', () => {
     expect(isTrustedConfigRequest(fakeReq({}))).toBe(false)
+  })
+})
+
+describe('resolveSecureCookies (session-cookie Secure attribute)', () => {
+  it('auto: plaintext without a terminator is not Secure', () => {
+    expect(resolveSecureCookies(baseConfig({ allowInsecurePlaintext: true }))).toBe(false)
+  })
+
+  it('auto: a declared trusted terminator implies Secure', () => {
+    expect(resolveSecureCookies(baseConfig({ trustedTerminator: 'nginx' }))).toBe(true)
+  })
+
+  it('auto: self TLS implies Secure', () => {
+    expect(resolveSecureCookies(baseConfig({ tlsEnabled: true }))).toBe(true)
+  })
+
+  it('explicit false wins over a declared terminator (plaintext proxy front)', () => {
+    expect(resolveSecureCookies(baseConfig({ trustedTerminator: 'nginx', secureCookies: false }))).toBe(false)
+  })
+
+  it('explicit true wins over a plaintext ingress', () => {
+    expect(resolveSecureCookies(baseConfig({ allowInsecurePlaintext: true, secureCookies: true }))).toBe(true)
+  })
+
+  it('an explicit false survives schemastery round-trip rather than collapsing to auto', () => {
+    // The settings card posts null to clear; a real false must not be coerced,
+    // or the plaintext-proxy escape hatch would silently re-enable Secure.
+    const parsed = Config(baseConfig({ trustedTerminator: 'nginx', secureCookies: false }))
+    expect(parsed.secureCookies).toBe(false)
+    expect(resolveSecureCookies(parsed)).toBe(false)
+  })
+
+  it('a cleared (null) secureCookies falls back to automatic', () => {
+    const parsed = Config({ ...baseConfig({ trustedTerminator: 'nginx' }), secureCookies: null } as unknown as GatewayConfig)
+    expect(resolveSecureCookies(parsed)).toBe(true)
   })
 })
