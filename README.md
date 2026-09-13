@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek%20Harness-4d6bfe?logo=deepseek&logoColor=fff&style=flat-square" alt="DeepSeek Harness" />
-  <img src="https://img.shields.io/badge/version-0.5.0-2b7fff?style=flat-square" alt="version 0.5.0" />
+  <img src="https://img.shields.io/badge/version-0.5.1-2b7fff?style=flat-square" alt="version 0.5.1" />
   <img src="https://img.shields.io/badge/TLS-8b5cf6?logo=lock&logoColor=fff&style=flat-square" alt="TLS" />
   <img src="https://img.shields.io/github/license/rice-awa/dsh-lan-gateway?style=flat-square" alt="MIT license" />
 </p>
@@ -228,6 +228,24 @@ IPv6 的 `fe80::/10`（link-local）与 `127.0.0.0/8` / `::1` 归类为 LAN/loop
   开放给任何非本机来源。
 - **WebSocket**：`/api` 升级请求同样过登录校验、同源 Origin 校验，再拼接转发给 dsh，
   并纳入会话撤销（epoch 变化即断开）。
+
+## 版本兼容（0.5.0 的加载失败与修复）
+
+0.5.0 及更早版本装在 **dsh ≥ 0.1.2-rc.1** 上会让整个 plugin tree 起不来：
+
+```
+Error: dsh: plugin tree failed to load: ...
+SyntaxError: The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'
+```
+
+`@deepseek-ai/dsh-settings` 自 `0.1.2-rc.1` 起删掉了 `settingsNamespace()` 这个品牌化辅助
+函数（命名空间改为 `register()` 内部校验的普通字符串字面量），旧版插件在 ESM 链接期就失败；
+cordis 的 include 一旦失败会连坐整棵树，所以表现是**所有插件都起不来**，而报错点看着像隔壁
+插件的名字。0.5.1 移除了该导入——运行时行为不变（新旧版本的 `register()` 都按同一个
+`NAMESPACE_PATTERN` 校验并原样接受这个字面量），因此 0.5.1 在 `0.1.0-rc.6` 到 `0.1.5-rc.2`
+的底座上都能加载。
+
+升级：`pnpm add @riceawa/dsh-lan-gateway@0.5.1`（或重新 `pnpm install` 走 link/github 安装）。
 
 ## 从 v0.4（及更早）升级
 

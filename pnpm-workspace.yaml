@@ -1,2 +1,11 @@
 allowBuilds:
   esbuild: true
+
+# The @deepseek-ai/* packages are provided by the running harness, not resolved
+# from the registry: every one of them declares a peer set pinned to its own
+# release line (dsh-client-runtime 0.1.1-rc.2 peers on dsh-llm ^0.1.1-rc.2 while
+# the host ships 0.1.5-rc.2), and prerelease ranges cannot span those lines —
+# so auto-installing them fails on the first `^0.1.5` with no matching release.
+# The same setting is what the dsh profile itself uses. Our own devDependencies
+# name the exact versions we compile and typecheck against.
+autoInstallPeers: false

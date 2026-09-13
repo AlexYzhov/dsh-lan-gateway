@@ -42,7 +42,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
+import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_LAN_CIDR_STRINGS, originMatchesHost } from './auth.ts'
 import { LanGateway } from './gateway.ts'
 import { readBody } from './login.ts'
@@ -160,8 +160,13 @@ export interface Config {
   trustedTerminator?: string
 }
 
-/** The `lan-gateway` user-settings namespace, mirroring the composition schema. */
-const NS = settingsNamespace('lan-gateway')
+/**
+ * The `lan-gateway` user-settings namespace, mirroring the composition schema.
+ * A plain string literal: dsh-settings dropped the `settingsNamespace()` brand
+ * helper in 0.1.2-rc.1 and `register` validates the literal itself, so this
+ * shape works against both that release line and the older branded one.
+ */
+const NS = 'lan-gateway'
 
 /** Optional config keys: an empty submitted value clears them back to the composition layer. */
 const OPTIONAL_CONFIG_KEYS = new Set(['dshTargetPort', 'tlsCertPath', 'tlsKeyPath', 'trustedTerminator'])
