@@ -335,6 +335,34 @@ pnpm test
 #                                            invalidate 重获取
 ```
 
+## 发布流程
+
+推 `v*` tag 触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：校验 tag 与
+`package.json` 版本一致 → `pnpm typecheck` + `pnpm test` → 发 npm → 建 GitHub Release 并附上
+`pnpm pack` 的 tgz。npm 侧走 **Trusted Publishing（GitHub OIDC）**，仓库里**不需要** `NPM_TOKEN`
+secret（`lib/` 被 gitignore，但 `prepack` 会构建，所以发布产物里始终有编译结果）。
+
+首次启用需在 npm 包页面配一次 Trusted Publisher（Settings → Trusted Publisher）：
+
+| 字段 | 值 |
+| --- | --- |
+| Organization or user | `rice-awa` |
+| Repository | `dsh-lan-gateway` |
+| Workflow filename | `release.yml` |
+| Environment | 留空 |
+
+配好之前 tag 推送会在 `npm publish` 一步失败（fail-closed，不会留下半个 Release）。
+
+本地手动发布（走 checkout 里的 `.npmrc` token，该文件不入库）：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test
+npm publish --access public      # prepack 自动构建 lib/
+git tag -a v0.5.2 -m "…" && git push origin v0.5.2
+gh release create v0.5.2 --generate-notes ./*.tgz   # 可选：Release + tgz 附件
+```
+
 ## 安全评估与修复记录
 
 0.5.0 的默认拒绝模型源自针对 QVD-2026-57410（DSH Web API 的 Host 信任缺陷）的加固，

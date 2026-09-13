@@ -1,0 +1,95 @@
+# Release automation for @riceawa/dsh-lan-gateway.
+#
+# Pushing a `v*` tag verifies the tree, publishes the package to npm through
+# Trusted Publishing (GitHub OIDC — no NPM_TOKEN secret), and then opens a GitHub
+# Release carrying the packed tarball. The Release is created only after npm
+# accepts the version, so a failed publish leaves no half-finished release.
+#
+# One-time setup on npmjs.com — package → Settings → Trusted Publisher:
+#   Organization or user: rice-awa
+#   Repository:           dsh-lan-gateway
+#   Workflow filename:    release.yml
+#   Environment:          (leave empty)
+# Until that is registered the publish step fails closed with npm's 404/401.
+#
+# Local equivalent (uses the token in the checkout's own .npmrc, checked in
+# nowhere): `pnpm typecheck && pnpm test && npm publish --access public`.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# `id-token: write` is what Trusted Publishing exchanges for a short-lived npm
+# credential; `contents: write` is what creates the Release.
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      # Reads the `packageManager` field, so CI runs the same pnpm as a dev box.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      # No `registry-url` on purpose: it would write an .npmrc whose
+      # ${NODE_AUTH_TOKEN} placeholder is unset here, and Trusted Publishing
+      # needs no token at all. npm defaults to registry.npmjs.org regardless.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Trusted Publishing needs the OIDC-capable npm CLI (>= 11.5.1); the one
+      # bundled with Node 22 is older.
+      - name: Upgrade npm
+        run: npm install --global npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # A tag that disagrees with package.json would publish the wrong version.
+      - name: Check the tag against package.json
+        run: |
+          declared="v$(node -p "require('./package.json').version")"
+          if [ "$declared" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json ($declared)"
+            exit 1
+          fi
+          echo "releasing $GITHUB_REF_NAME"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # Publishes the built package: `prepack` runs tsdown, so lib/ ships even
+      # though it is gitignored.
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+
+      # Pack separately for the Release asset; `pnpm pack` runs prepack too.
+      - name: Pack the tarball
+        run: pnpm pack
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            ./riceawa-dsh-lan-gateway-*.tgz
